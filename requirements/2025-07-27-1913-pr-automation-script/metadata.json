@@ -1,0 +1,13 @@
+{
+  "id": "pr-automation-script",
+  "started": "2025-07-27T19:13:00Z",
+  "lastUpdated": "2025-07-27T19:13:00Z",
+  "status": "active",
+  "phase": "complete",
+  "progress": {
+    "discovery": { "answered": 10, "total": 10 },
+    "detail": { "answered": 10, "total": 10 }
+  },
+  "contextFiles": [],
+  "relatedFeatures": []
+}
