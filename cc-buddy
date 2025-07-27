@@ -1,0 +1,591 @@
+#!/bin/bash
+
+set -euo pipefail
+
+# cc-buddy: PR Automation Script
+# Automates git worktree creation, container building, and development environment management
+
+VERSION="1.0.0"
+
+# Default configuration
+DEFAULT_WORKTREE_DIR="$HOME/.worktrees"
+METADATA_DIR=".cc-buddy"
+ENVIRONMENTS_FILE="$METADATA_DIR/environments.json"
+CONFIG_FILE="$METADATA_DIR/config.json"
+
+# Global variables
+WORKTREE_DIR=""
+CONTAINERFILE=""
+RUNTIME=""
+EXPOSE_ALL=false
+COMMAND=""
+BRANCH_NAME=""
+ENVIRONMENT_NAME=""
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Logging functions
+log_info() {
+    echo -e "${BLUE}[INFO]${NC} $1" >&2
+}
+
+log_success() {
+    echo -e "${GREEN}[SUCCESS]${NC} $1" >&2
+}
+
+log_warn() {
+    echo -e "${YELLOW}[WARN]${NC} $1" >&2
+}
+
+log_error() {
+    echo -e "${RED}[ERROR]${NC} $1" >&2
+}
+
+# Print usage information
+usage() {
+    cat << EOF
+cc-buddy v${VERSION} - PR Automation Script
+
+USAGE:
+    cc-buddy <command> [options] [arguments]
+
+COMMANDS:
+    create <branch-name>    Create new development environment
+    list                    List all active environments
+    delete <env-name>       Delete development environment
+
+OPTIONS:
+    --worktree-dir <path>   Set worktree directory (default: ~/.worktrees)
+    --containerfile <path>  Specify containerfile path
+    --runtime <docker|podman>  Override container runtime
+    --expose-all            Publish all container ports to host
+    -h, --help              Show this help message
+    -v, --version           Show version information
+
+EXAMPLES:
+    cc-buddy create feature-branch
+    cc-buddy create origin/feature-branch --expose-all
+    cc-buddy list
+    cc-buddy delete my-repo-feature-branch
+
+ENVIRONMENT VARIABLES:
+    GIT_WORKTREES_DIR      Default worktree directory
+    GITHUB_TOKEN           GitHub token (passed to containers)
+
+EOF
+}
+
+# Parse command line arguments
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            create|list|delete)
+                COMMAND="$1"
+                shift
+                if [[ "$COMMAND" == "create" || "$COMMAND" == "delete" ]] && [[ $# -gt 0 && ! "$1" =~ ^-- ]]; then
+                    if [[ "$COMMAND" == "create" ]]; then
+                        BRANCH_NAME="$1"
+                    else
+                        ENVIRONMENT_NAME="$1"
+                    fi
+                    shift
+                fi
+                ;;
+            --worktree-dir)
+                WORKTREE_DIR="$2"
+                shift 2
+                ;;
+            --containerfile)
+                CONTAINERFILE="$2"
+                shift 2
+                ;;
+            --runtime)
+                if [[ "$2" != "docker" && "$2" != "podman" ]]; then
+                    log_error "Runtime must be 'docker' or 'podman'"
+                    exit 1
+                fi
+                RUNTIME="$2"
+                shift 2
+                ;;
+            --expose-all)
+                EXPOSE_ALL=true
+                shift
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            -v|--version)
+                echo "cc-buddy v${VERSION}"
+                exit 0
+                ;;
+            *)
+                log_error "Unknown option: $1"
+                usage
+                exit 1
+                ;;
+        esac
+    done
+
+    # Set default worktree directory
+    if [[ -z "$WORKTREE_DIR" ]]; then
+        WORKTREE_DIR="${GIT_WORKTREES_DIR:-$DEFAULT_WORKTREE_DIR}"
+    fi
+
+    # Validate command
+    if [[ -z "$COMMAND" ]]; then
+        log_error "No command specified"
+        usage
+        exit 1
+    fi
+
+    # Validate arguments for specific commands
+    if [[ "$COMMAND" == "create" && -z "$BRANCH_NAME" ]]; then
+        log_error "Branch name required for create command"
+        usage
+        exit 1
+    fi
+
+    if [[ "$COMMAND" == "delete" && -z "$ENVIRONMENT_NAME" ]]; then
+        log_error "Environment name required for delete command"
+        usage
+        exit 1
+    fi
+}
+
+# Detect and validate git repository
+validate_git_repo() {
+    if ! git rev-parse --git-dir >/dev/null 2>&1; then
+        log_error "Not in a git repository"
+        exit 1
+    fi
+}
+
+# Get repository name from git remote
+get_repo_name() {
+    local remote_url
+    remote_url=$(git remote get-url origin 2>/dev/null || echo "")
+    
+    if [[ -z "$remote_url" ]]; then
+        log_error "No origin remote found"
+        exit 1
+    fi
+
+    # Extract repo name from various URL formats
+    local repo_name
+    if [[ "$remote_url" =~ github\.com[:/]([^/]+)/([^/]+)(\.git)?$ ]]; then
+        repo_name="${BASH_REMATCH[2]}"
+    else
+        # Fallback: use last part of path
+        repo_name=$(basename "$remote_url" .git)
+    fi
+
+    echo "$repo_name"
+}
+
+# Detect container runtime
+detect_runtime() {
+    if [[ -n "$RUNTIME" ]]; then
+        echo "$RUNTIME"
+        return
+    fi
+
+    if command -v podman >/dev/null 2>&1; then
+        echo "podman"
+    elif command -v docker >/dev/null 2>&1; then
+        echo "docker"
+    else
+        log_error "Neither podman nor docker found"
+        exit 1
+    fi
+}
+
+# Find containerfile
+find_containerfile() {
+    if [[ -n "$CONTAINERFILE" ]]; then
+        if [[ ! -f "$CONTAINERFILE" ]]; then
+            log_error "Specified containerfile not found: $CONTAINERFILE"
+            exit 1
+        fi
+        echo "$CONTAINERFILE"
+        return
+    fi
+
+    # Default search order
+    for file in "Containerfile.dev" "Dockerfile.dev"; do
+        if [[ -f "$file" ]]; then
+            echo "$file"
+            return
+        fi
+    done
+
+    log_error "No development containerfile found (Containerfile.dev or Dockerfile.dev)"
+    exit 1
+}
+
+# Initialize metadata directory and files
+init_metadata() {
+    mkdir -p "$METADATA_DIR"
+    
+    if [[ ! -f "$ENVIRONMENTS_FILE" ]]; then
+        echo '{"environments": []}' > "$ENVIRONMENTS_FILE"
+    fi
+    
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        echo '{}' > "$CONFIG_FILE"
+    fi
+}
+
+# Read environments from JSON file
+read_environments() {
+    if [[ -f "$ENVIRONMENTS_FILE" ]]; then
+        cat "$ENVIRONMENTS_FILE"
+    else
+        echo '{"environments": []}'
+    fi
+}
+
+# Write environments to JSON file
+write_environments() {
+    local environments_json="$1"
+    echo "$environments_json" > "$ENVIRONMENTS_FILE"
+}
+
+# Check if environment exists for branch
+environment_exists() {
+    local branch="$1"
+    local repo_name="$2"
+    local env_name="${repo_name}-${branch//\//-}"
+    
+    local environments
+    environments=$(read_environments)
+    
+    echo "$environments" | jq -e ".environments[] | select(.name == \"$env_name\")" >/dev/null 2>&1
+}
+
+# Generate environment name
+generate_env_name() {
+    local branch="$1"
+    local repo_name="$2"
+    echo "${repo_name}-${branch//\//-}"
+}
+
+# Clean up resources on failure
+cleanup_on_failure() {
+    local env_name="$1"
+    local worktree_path="$2"
+    local container_name="$3"
+    local volume_name="$4"
+    local runtime="$5"
+    
+    log_warn "Cleaning up partial resources for $env_name"
+    
+    # Stop and remove container
+    if [[ -n "$container_name" ]]; then
+        $runtime stop "$container_name" >/dev/null 2>&1 || true
+        $runtime rm "$container_name" >/dev/null 2>&1 || true
+    fi
+    
+    # Remove volume
+    if [[ -n "$volume_name" ]]; then
+        $runtime volume rm "$volume_name" >/dev/null 2>&1 || true
+    fi
+    
+    # Remove worktree
+    if [[ -n "$worktree_path" && -d "$worktree_path" ]]; then
+        git worktree remove "$worktree_path" --force >/dev/null 2>&1 || true
+    fi
+    
+    # Remove from environments file
+    local environments
+    environments=$(read_environments)
+    environments=$(echo "$environments" | jq "del(.environments[] | select(.name == \"$env_name\"))")
+    write_environments "$environments"
+}
+
+# Check if branch exists locally or remotely
+branch_exists() {
+    local branch="$1"
+    
+    # Check if branch exists locally
+    if git show-ref --verify --quiet "refs/heads/$branch"; then
+        return 0
+    fi
+    
+    # Check if branch exists on remote
+    if git show-ref --verify --quiet "refs/remotes/$branch"; then
+        return 0
+    fi
+    
+    # For remote branch references like origin/branch-name
+    if [[ "$branch" =~ ^[^/]+/.+ ]] && git show-ref --verify --quiet "refs/remotes/$branch"; then
+        return 0
+    fi
+    
+    return 1
+}
+
+# Create branch if it doesn't exist
+create_branch_if_needed() {
+    local branch="$1"
+    
+    # Skip if branch already exists
+    if branch_exists "$branch"; then
+        log_info "Branch '$branch' already exists"
+        return 0
+    fi
+    
+    # Don't create branches for remote references like origin/branch-name
+    if [[ "$branch" =~ ^[^/]+/.+ ]]; then
+        log_error "Remote branch '$branch' does not exist"
+        exit 1
+    fi
+    
+    # Create new branch from current HEAD
+    log_info "Creating new branch '$branch' from current HEAD"
+    git branch "$branch"
+    
+    return 0
+}
+
+# Create command implementation
+cmd_create() {
+    local branch="$BRANCH_NAME"
+    local runtime
+    local containerfile
+    local repo_name
+    local env_name
+    local worktree_path
+    local container_name
+    local volume_name
+    
+    validate_git_repo
+    init_metadata
+    
+    repo_name=$(get_repo_name)
+    env_name=$(generate_env_name "$branch" "$repo_name")
+    
+    # Check if environment already exists
+    if environment_exists "$branch" "$repo_name"; then
+        log_error "Environment already exists for branch '$branch'"
+        exit 1
+    fi
+    
+    runtime=$(detect_runtime)
+    containerfile=$(find_containerfile)
+    
+    worktree_path="$WORKTREE_DIR/$env_name"
+    container_name="cc-buddy-$env_name"
+    volume_name="cc-buddy-$env_name-data"
+    
+    log_info "Creating environment '$env_name' for branch '$branch'"
+    log_info "Runtime: $runtime"
+    log_info "Containerfile: $containerfile"
+    log_info "Worktree: $worktree_path"
+    
+    # Create worktree directory if it doesn't exist
+    mkdir -p "$WORKTREE_DIR"
+    
+    # Trap for cleanup on failure
+    trap "cleanup_on_failure '$env_name' '$worktree_path' '$container_name' '$volume_name' '$runtime'" ERR
+    
+    # Create branch if it doesn't exist
+    create_branch_if_needed "$branch"
+    
+    # Create worktree
+    log_info "Creating git worktree..."
+    git worktree add "$worktree_path" "$branch"
+    
+    # Build container
+    log_info "Building container..."
+    cd "$worktree_path"
+    $runtime build -f "$containerfile" -t "$container_name" .
+    
+    # Create volume
+    log_info "Creating volume..."
+    $runtime volume create "$volume_name"
+    
+    # Prepare port arguments
+    local port_args=""
+    if [[ "$EXPOSE_ALL" == true ]]; then
+        # Extract EXPOSE directives from containerfile
+        local exposed_ports
+        exposed_ports=$(grep -i "^EXPOSE" "$containerfile" | awk '{for(i=2;i<=NF;i++) print $i}' | tr '\n' ' ' || true)
+        for port in $exposed_ports; do
+            port_args="$port_args -p $port:$port"
+        done
+    fi
+    
+    # Start container
+    log_info "Starting container..."
+    local container_id
+    container_id=$($runtime run -d \
+        --name "$container_name" \
+        --workdir /workspace \
+        -v "$worktree_path:/workspace" \
+        -v "$volume_name:/data" \
+        -e "GITHUB_TOKEN=${GITHUB_TOKEN:-}" \
+        $port_args \
+        "$container_name" \
+        sleep infinity)
+    
+    # Update environments file
+    local environments
+    local new_env
+    environments=$(read_environments)
+    new_env=$(cat << EOF
+{
+  "name": "$env_name",
+  "branch": "$branch",
+  "worktree_path": "$worktree_path",
+  "container_id": "$container_id",
+  "container_name": "$container_name",
+  "volume_name": "$volume_name",
+  "created": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "status": "running"
+}
+EOF
+    )
+    
+    environments=$(echo "$environments" | jq ".environments += [$new_env]")
+    write_environments "$environments"
+    
+    # Clear trap
+    trap - ERR
+    
+    log_success "Environment '$env_name' created successfully"
+    log_info "Container: $container_name"
+    log_info "Worktree: $worktree_path"
+    log_info "To attach: $runtime exec -it $container_name bash"
+}
+
+# List command implementation
+cmd_list() {
+    init_metadata
+    
+    local environments
+    environments=$(read_environments)
+    
+    local count
+    count=$(echo "$environments" | jq '.environments | length')
+    
+    if [[ "$count" -eq 0 ]]; then
+        log_info "No active environments"
+        return
+    fi
+    
+    printf "%-30s %-20s %-15s %s\n" "ENVIRONMENT" "BRANCH" "STATUS" "WORKTREE"
+    printf "%-30s %-20s %-15s %s\n" "$(printf '%*s' 30 '' | tr ' ' '-')" "$(printf '%*s' 20 '' | tr ' ' '-')" "$(printf '%*s' 15 '' | tr ' ' '-')" "$(printf '%*s' 40 '' | tr ' ' '-')"
+    
+    echo "$environments" | jq -r '.environments[] | "\(.name)|\(.branch)|\(.status)|\(.worktree_path)"' | \
+    while IFS='|' read -r name branch status worktree; do
+        printf "%-30s %-20s %-15s %s\n" "$name" "$branch" "$status" "$worktree"
+    done
+}
+
+# Delete command implementation
+cmd_delete() {
+    local env_name="$ENVIRONMENT_NAME"
+    
+    init_metadata
+    
+    local environments
+    environments=$(read_environments)
+    
+    # Find environment
+    local env_data
+    env_data=$(echo "$environments" | jq -r ".environments[] | select(.name == \"$env_name\")")
+    
+    if [[ -z "$env_data" ]]; then
+        log_error "Environment '$env_name' not found"
+        exit 1
+    fi
+    
+    local container_name
+    local volume_name
+    local worktree_path
+    container_name=$(echo "$env_data" | jq -r '.container_name')
+    volume_name=$(echo "$env_data" | jq -r '.volume_name')
+    worktree_path=$(echo "$env_data" | jq -r '.worktree_path')
+    
+    local runtime
+    runtime=$(detect_runtime)
+    
+    log_info "Deleting environment '$env_name'"
+    
+    # Stop and remove container
+    log_info "Stopping container..."
+    $runtime stop "$container_name" >/dev/null 2>&1 || true
+    $runtime rm "$container_name" >/dev/null 2>&1 || true
+    
+    # Remove volume
+    log_info "Removing volume..."
+    $runtime volume rm "$volume_name" >/dev/null 2>&1 || true
+    
+    # Remove worktree
+    if [[ -d "$worktree_path" ]]; then
+        log_info "Removing worktree..."
+        git worktree remove "$worktree_path" --force
+    fi
+    
+    # Update environments file
+    environments=$(echo "$environments" | jq "del(.environments[] | select(.name == \"$env_name\"))")
+    write_environments "$environments"
+    
+    log_success "Environment '$env_name' deleted successfully"
+}
+
+# Main function
+main() {
+    parse_args "$@"
+    
+    case "$COMMAND" in
+        create)
+            cmd_create
+            ;;
+        list)
+            cmd_list
+            ;;
+        delete)
+            cmd_delete
+            ;;
+        *)
+            log_error "Unknown command: $COMMAND"
+            usage
+            exit 1
+            ;;
+    esac
+}
+
+# Check for required dependencies
+check_dependencies() {
+    local missing_deps=()
+    
+    if ! command -v git >/dev/null 2>&1; then
+        missing_deps+=("git")
+    fi
+    
+    if ! command -v jq >/dev/null 2>&1; then
+        missing_deps+=("jq")
+    fi
+    
+    if ! command -v docker >/dev/null 2>&1 && ! command -v podman >/dev/null 2>&1; then
+        missing_deps+=("docker or podman")
+    fi
+    
+    if [[ ${#missing_deps[@]} -gt 0 ]]; then
+        log_error "Missing required dependencies: ${missing_deps[*]}"
+        exit 1
+    fi
+}
+
+# Entry point
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    check_dependencies
+    main "$@"
+fi
