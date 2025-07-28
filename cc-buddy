@@ -9,7 +9,9 @@ VERSION="1.0.0"
 
 # Default configuration
 DEFAULT_WORKTREE_DIR="$HOME/.worktrees"
-METADATA_DIR=".cc-buddy"
+# Store the original working directory for metadata files
+ORIGINAL_DIR="$(pwd)"
+METADATA_DIR="$ORIGINAL_DIR/.cc-buddy"
 ENVIRONMENTS_FILE="$METADATA_DIR/environments.json"
 CONFIG_FILE="$METADATA_DIR/config.json"
 
@@ -257,6 +259,8 @@ read_environments() {
 # Write environments to JSON file
 write_environments() {
     local environments_json="$1"
+    # Ensure metadata directory exists
+    mkdir -p "$METADATA_DIR"
     echo "$environments_json" > "$ENVIRONMENTS_FILE"
 }
 
@@ -345,10 +349,15 @@ create_branch_if_needed() {
     fi
     
     # Don't create branches for remote references like origin/branch-name
-    if [[ "$branch" =~ ^[^/]+/.+ ]]; then
-        log_error "Remote branch '$branch' does not exist"
-        exit 1
-    fi
+    # Only treat as remote if it starts with a known remote name
+    local remotes
+    remotes=$(git remote 2>/dev/null || echo "")
+    for remote in $remotes; do
+        if [[ "$branch" =~ ^${remote}/.+ ]]; then
+            log_error "Remote branch '$branch' does not exist"
+            exit 1
+        fi
+    done
     
     # Create new branch from current HEAD
     log_info "Creating new branch '$branch' from current HEAD"
@@ -382,6 +391,8 @@ cmd_create() {
     
     runtime=$(detect_runtime)
     containerfile=$(find_containerfile)
+    # Get absolute path to containerfile before changing directories
+    containerfile=$(realpath "$containerfile")
     
     worktree_path="$WORKTREE_DIR/$env_name"
     container_name="cc-buddy-$env_name"
@@ -401,9 +412,17 @@ cmd_create() {
     # Create branch if it doesn't exist
     create_branch_if_needed "$branch"
     
-    # Create worktree
-    log_info "Creating git worktree..."
-    git worktree add "$worktree_path" "$branch"
+    # Create worktree (or use existing one)
+    if [[ -d "$worktree_path" ]]; then
+        log_info "Using existing worktree at $worktree_path"
+        # Ensure it's on the correct branch
+        cd "$worktree_path"
+        git checkout "$branch" 2>/dev/null || true
+        cd - >/dev/null
+    else
+        log_info "Creating git worktree..."
+        git worktree add "$worktree_path" "$branch"
+    fi
     
     # Build container
     log_info "Building container..."
@@ -431,7 +450,7 @@ cmd_create() {
     container_id=$($runtime run -d \
         --name "$container_name" \
         --workdir /workspace \
-        -v "$worktree_path:/workspace" \
+        -v "$worktree_path:/workspace:Z" \
         -v "$volume_name:/data" \
         -e "GITHUB_TOKEN=${GITHUB_TOKEN:-}" \
         $port_args \

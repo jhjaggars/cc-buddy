@@ -1,0 +1,14 @@
+FROM debian:bookworm
+
+RUN apt-get update && apt-get install -y \
+    git \
+    curl \
+    wget \
+    vim \
+    build-essential \
+    procps \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+
+CMD ["/bin/bash"]
