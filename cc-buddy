@@ -166,14 +166,18 @@ validate_git_repo() {
     fi
 }
 
-# Get repository name from git remote
+# Get repository name from git remote or local directory
 get_repo_name() {
     local remote_url
     remote_url=$(git remote get-url origin 2>/dev/null || echo "")
     
     if [[ -z "$remote_url" ]]; then
-        log_error "No origin remote found"
-        exit 1
+        # No origin remote found, use current directory name
+        local repo_name
+        repo_name=$(basename "$(git rev-parse --show-toplevel)")
+        log_info "No origin remote found, using directory name: $repo_name"
+        echo "$repo_name"
+        return
     fi
 
     # Extract repo name from various URL formats
