@@ -60,6 +60,7 @@ COMMANDS:
     create <branch-name>    Create new development environment
     list                    List all active environments
     delete <env-name>       Delete development environment
+    terminal <env-name>     Open shell in running environment
 
 OPTIONS:
     --worktree-dir <path>   Set worktree directory (default: ~/.worktrees)
@@ -74,6 +75,7 @@ EXAMPLES:
     cc-buddy create origin/feature-branch --expose-all
     cc-buddy list
     cc-buddy delete my-repo-feature-branch
+    cc-buddy terminal my-repo-feature-branch
 
 ENVIRONMENT VARIABLES:
     GIT_WORKTREES_DIR      Default worktree directory
@@ -86,10 +88,10 @@ EOF
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case $1 in
-            create|list|delete)
+            create|list|delete|terminal)
                 COMMAND="$1"
                 shift
-                if [[ "$COMMAND" == "create" || "$COMMAND" == "delete" ]] && [[ $# -gt 0 && ! "$1" =~ ^-- ]]; then
+                if [[ "$COMMAND" == "create" || "$COMMAND" == "delete" || "$COMMAND" == "terminal" ]] && [[ $# -gt 0 && ! "$1" =~ ^-- ]]; then
                     if [[ "$COMMAND" == "create" ]]; then
                         BRANCH_NAME="$1"
                     else
@@ -155,6 +157,12 @@ parse_args() {
 
     if [[ "$COMMAND" == "delete" && -z "$ENVIRONMENT_NAME" ]]; then
         log_error "Environment name required for delete command"
+        usage
+        exit 1
+    fi
+
+    if [[ "$COMMAND" == "terminal" && -z "$ENVIRONMENT_NAME" ]]; then
+        log_error "Environment name required for terminal command"
         usage
         exit 1
     fi
@@ -563,6 +571,49 @@ cmd_delete() {
     log_success "Environment '$env_name' deleted successfully"
 }
 
+# Terminal command implementation
+cmd_terminal() {
+    local env_name="$ENVIRONMENT_NAME"
+    
+    init_metadata
+    
+    local environments
+    environments=$(read_environments)
+    
+    # Find environment
+    local env_data
+    env_data=$(echo "$environments" | jq -r ".environments[] | select(.name == \"$env_name\")")
+    
+    if [[ -z "$env_data" ]]; then
+        log_error "Environment '$env_name' not found"
+        exit 1
+    fi
+    
+    local container_name
+    local status
+    container_name=$(echo "$env_data" | jq -r '.container_name')
+    status=$(echo "$env_data" | jq -r '.status')
+    
+    if [[ "$status" != "running" ]]; then
+        log_error "Environment '$env_name' is not running (status: $status)"
+        exit 1
+    fi
+    
+    local runtime
+    runtime=$(detect_runtime)
+    
+    # Check if container is actually running
+    if ! $runtime ps --format "table {{.Names}}" | grep -q "^$container_name$"; then
+        log_error "Container '$container_name' is not running"
+        exit 1
+    fi
+    
+    log_info "Opening terminal in environment '$env_name'"
+    
+    # Execute interactive shell in container
+    exec $runtime exec -it "$container_name" bash
+}
+
 # Main function
 main() {
     parse_args "$@"
@@ -576,6 +627,9 @@ main() {
             ;;
         delete)
             cmd_delete
+            ;;
+        terminal)
+            cmd_terminal
             ;;
         *)
             log_error "Unknown command: $COMMAND"
