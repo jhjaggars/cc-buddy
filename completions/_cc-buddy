@@ -1,0 +1,87 @@
+#compdef cc-buddy
+
+# Zsh completion for cc-buddy
+# To install: copy this file to a directory in your $fpath (e.g., /usr/local/share/zsh/site-functions/)
+
+_cc_buddy() {
+    local context state state_descr line
+    typeset -A opt_args
+
+    # Function to get git branches
+    _cc_buddy_branches() {
+        local branches
+        if git rev-parse --git-dir >/dev/null 2>&1; then
+            branches=(${(f)"$(git branch -a 2>/dev/null | sed 's/^[* ] //' | sed 's/^remotes\///' | grep -v '^HEAD' | sort -u)"})
+            _describe 'git branches' branches
+        fi
+    }
+
+    # Function to get environment names
+    _cc_buddy_environments() {
+        local envs metadata_file=".cc-buddy/environments.json"
+        if [[ -f "$metadata_file" ]]; then
+            envs=(${(f)"$(jq -r '.environments[].name' "$metadata_file" 2>/dev/null)"})
+            _describe 'environments' envs
+        fi
+    }
+
+    # Function to complete runtime options
+    _cc_buddy_runtime() {
+        _values 'container runtime' \
+            'docker[Use Docker as container runtime]' \
+            'podman[Use Podman as container runtime]'
+    }
+
+    local -a global_options
+    global_options=(
+        '--worktree-dir[Set worktree directory]:directory:_directories'
+        '--containerfile[Specify containerfile path]:file:_files'
+        '--runtime[Override container runtime]:runtime:_cc_buddy_runtime'
+        '--expose-all[Publish all container ports to host]'
+        '(-h --help)'{-h,--help}'[Show help message]'
+        '(-v --version)'{-v,--version}'[Show version information]'
+    )
+
+    _arguments -C \
+        $global_options \
+        '1: :->commands' \
+        '*:: :->args' \
+        && return 0
+
+    case $state in
+        commands)
+            local -a commands
+            commands=(
+                'create:Create new development environment'
+                'list:List all active environments'
+                'delete:Delete development environment'
+                'terminal:Open shell in running environment'
+            )
+            _describe 'commands' commands
+            ;;
+        args)
+            case $words[1] in
+                create)
+                    _arguments \
+                        $global_options \
+                        '1:branch name:_cc_buddy_branches'
+                    ;;
+                list)
+                    _arguments $global_options
+                    ;;
+                delete)
+                    _arguments \
+                        $global_options \
+                        '1:environment name:_cc_buddy_environments'
+                    ;;
+                terminal)
+                    _arguments \
+                        $global_options \
+                        '1:environment name:_cc_buddy_environments'
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+_cc_buddy "$@"

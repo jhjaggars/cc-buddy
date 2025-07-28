@@ -20,6 +20,7 @@ WORKTREE_DIR=""
 CONTAINERFILE=""
 RUNTIME=""
 EXPOSE_ALL=false
+LAUNCH_TERMINAL=false
 COMMAND=""
 BRANCH_NAME=""
 ENVIRONMENT_NAME=""
@@ -67,12 +68,14 @@ OPTIONS:
     --containerfile <path>  Specify containerfile path
     --runtime <docker|podman>  Override container runtime
     --expose-all            Publish all container ports to host
+    --terminal, -t          Launch terminal after environment creation
     -h, --help              Show this help message
     -v, --version           Show version information
 
 EXAMPLES:
     cc-buddy create feature-branch
     cc-buddy create origin/feature-branch --expose-all
+    cc-buddy create feature-branch --terminal
     cc-buddy list
     cc-buddy delete my-repo-feature-branch
     cc-buddy terminal my-repo-feature-branch
@@ -118,6 +121,10 @@ parse_args() {
                 ;;
             --expose-all)
                 EXPOSE_ALL=true
+                shift
+                ;;
+            --terminal|-t)
+                LAUNCH_TERMINAL=true
                 shift
                 ;;
             -h|--help)
@@ -432,6 +439,7 @@ cmd_create() {
         git worktree add "$worktree_path" "$branch"
     fi
     
+    
     # Build container
     log_info "Building container..."
     cd "$worktree_path"
@@ -459,11 +467,17 @@ cmd_create() {
         --name "$container_name" \
         --workdir /workspace \
         -v "$worktree_path:/workspace:Z" \
+        -v "$ORIGINAL_DIR/.git:$ORIGINAL_DIR/.git:Z" \
         -v "$volume_name:/data" \
-        -e "GITHUB_TOKEN=${GITHUB_TOKEN:-}" \
+        -v "$HOME/.claude.json:/tmp/host-claude.json:ro,Z" \
+        -v "$HOME/.claude/.credentials.json:/root/.claude/.credentials.json:ro,Z" \
+        -v "$HOME/.claude/agents:/root/.claude/agents:ro,Z" \
+        -v "$HOME/.claude/commands:/root/.claude/commands:ro,Z" \
+        -v "$HOME/.claude/CLAUDE.md:/root/.claude/CLAUDE.md:ro,Z" \
+        -e "GITHUB_TOKEN=$(gh auth token)" \
         $port_args \
         "$container_name" \
-        sleep infinity)
+        bash -c "cp /tmp/host-claude.json /root/.claude.json && sleep infinity")
     
     # Update environments file
     local environments
@@ -493,6 +507,13 @@ EOF
     log_info "Container: $container_name"
     log_info "Worktree: $worktree_path"
     log_info "To attach: $runtime exec -it $container_name bash"
+    
+    # Launch terminal if requested
+    if [[ "$LAUNCH_TERMINAL" == true ]]; then
+        log_info "Launching terminal..."
+        ENVIRONMENT_NAME="$env_name"
+        cmd_terminal
+    fi
 }
 
 # List command implementation
@@ -551,7 +572,8 @@ cmd_delete() {
     
     # Stop and remove container
     log_info "Stopping container..."
-    $runtime stop "$container_name" >/dev/null 2>&1 || true
+    $runtime exec "$container_name" pkill -f "sleep infinity" >/dev/null 2>&1 || true
+    $runtime stop -t 0 "$container_name" >/dev/null 2>&1 || true
     $runtime rm "$container_name" >/dev/null 2>&1 || true
     
     # Remove volume
