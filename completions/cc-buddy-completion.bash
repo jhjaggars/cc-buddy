@@ -10,10 +10,10 @@ _cc_buddy_completion() {
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
     # Main commands
-    local commands="create list delete terminal"
+    local commands="init create list delete terminal"
     
     # Global options
-    local global_opts="--worktree-dir --containerfile --runtime --expose-all -h --help -v --version"
+    local global_opts="--worktree-dir --containerfile --runtime --expose-all --force --terminal -t -h --help -v --version"
 
     # Function to get git branches for create command
     _get_git_branches() {
@@ -62,7 +62,7 @@ _cc_buddy_completion() {
     local i=1
     while [[ $i -lt $COMP_CWORD ]]; do
         case "${COMP_WORDS[$i]}" in
-            create|list|delete|terminal)
+            init|create|list|delete|terminal)
                 command="${COMP_WORDS[$i]}"
                 break
                 ;;
@@ -72,6 +72,11 @@ _cc_buddy_completion() {
 
     # Handle completion based on the command
     case "$command" in
+        init)
+            # For init command, only complete with options
+            local init_opts="--force"
+            COMPREPLY=($(compgen -W "$init_opts" -- "$cur"))
+            ;;
         create)
             # For create command, complete with branch names and options
             local create_opts="--worktree-dir --containerfile --runtime --expose-all"

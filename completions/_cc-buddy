@@ -38,6 +38,8 @@ _cc_buddy() {
         '--containerfile[Specify containerfile path]:file:_files'
         '--runtime[Override container runtime]:runtime:_cc_buddy_runtime'
         '--expose-all[Publish all container ports to host]'
+        '--force[Force overwrite existing files]'
+        '(-t --terminal)'{-t,--terminal}'[Launch terminal after creation]'
         '(-h --help)'{-h,--help}'[Show help message]'
         '(-v --version)'{-v,--version}'[Show version information]'
     )
@@ -52,6 +54,7 @@ _cc_buddy() {
         commands)
             local -a commands
             commands=(
+                'init:Create Containerfile.dev in current directory'
                 'create:Create new development environment'
                 'list:List all active environments'
                 'delete:Delete development environment'
@@ -61,6 +64,9 @@ _cc_buddy() {
             ;;
         args)
             case $words[1] in
+                init)
+                    _arguments $global_options
+                    ;;
                 create)
                     _arguments \
                         $global_options \
