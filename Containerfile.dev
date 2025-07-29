@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y \
     nodejs \
     npm \
     jq \
+    sudo \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Claude Code CLI
@@ -23,8 +24,20 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | d
     && apt-get update \
     && apt-get install gh -y
 
+# Create a non-root user
+ARG USERNAME=developer
+ARG USER_UID=1000
+ARG USER_GID=$USER_UID
+
+RUN groupadd --gid $USER_GID $USERNAME \
+    && useradd --uid $USER_UID --gid $USER_GID -m $USERNAME \
+    && echo $USERNAME ALL=\(root\) NOPASSWD:ALL > /etc/sudoers.d/$USERNAME \
+    && chmod 0440 /etc/sudoers.d/$USERNAME
+
 # Create directory for Claude Code configuration (mounted at runtime)
-RUN mkdir -p /root/.claude
+RUN mkdir -p /home/$USERNAME/.claude && chown $USERNAME:$USERNAME /home/$USERNAME/.claude
+
+USER $USERNAME
 
 WORKDIR /workspace
 

@@ -330,7 +330,13 @@ cleanup_on_failure() {
     
     # Remove worktree
     if [[ -n "$worktree_path" && -d "$worktree_path" ]]; then
-        git worktree remove "$worktree_path" --force >/dev/null 2>&1 || true
+        # Try git worktree remove first
+        if ! git worktree remove "$worktree_path" --force >/dev/null 2>&1; then
+            # If that fails due to permissions, use podman unshare for cleanup
+            if [[ "$runtime" == "podman" ]] && command -v podman >/dev/null 2>&1; then
+                podman unshare rm -rf "$worktree_path" >/dev/null 2>&1 || true
+            fi
+        fi
     fi
     
     # Remove from environments file
@@ -417,6 +423,7 @@ RUN apt-get update && apt-get install -y \
     nodejs \
     npm \
     jq \
+    sudo \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Claude Code CLI
@@ -429,8 +436,20 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | d
     && apt-get update \
     && apt-get install gh -y
 
+# Create a non-root user
+ARG USERNAME=developer
+ARG USER_UID=1000
+ARG USER_GID=$USER_UID
+
+RUN groupadd --gid $USER_GID $USERNAME \
+    && useradd --uid $USER_UID --gid $USER_GID -m $USERNAME \
+    && echo $USERNAME ALL=\(root\) NOPASSWD:ALL > /etc/sudoers.d/$USERNAME \
+    && chmod 0440 /etc/sudoers.d/$USERNAME
+
 # Create directory for Claude Code configuration (mounted at runtime)
-RUN mkdir -p /root/.claude
+RUN mkdir -p /home/$USERNAME/.claude && chown $USERNAME:$USERNAME /home/$USERNAME/.claude
+
+USER $USERNAME
 
 WORKDIR /workspace
 
@@ -503,7 +522,14 @@ cmd_create() {
     # Build container
     log_info "Building container..."
     cd "$worktree_path"
-    $runtime build -f "$containerfile" -t "$container_name" .
+    # Get the current user's UID and GID to build container with matching user
+    local user_uid=$(id -u)
+    local user_gid=$(id -g)
+    $runtime build -f "$containerfile" \
+        --build-arg USERNAME=developer \
+        --build-arg USER_UID="$user_uid" \
+        --build-arg USER_GID="$user_gid" \
+        -t "$container_name" .
     
     # Create volume
     log_info "Creating volume..."
@@ -523,6 +549,7 @@ cmd_create() {
     # Start container
     log_info "Starting container..."
     local container_id
+    
     container_id=$($runtime run -d \
         --name "$container_name" \
         --workdir /workspace \
@@ -530,14 +557,14 @@ cmd_create() {
         -v "$ORIGINAL_DIR/.git:$ORIGINAL_DIR/.git:Z" \
         -v "$volume_name:/data" \
         -v "$HOME/.claude.json:/tmp/host-claude.json:ro,Z" \
-        -v "$HOME/.claude/.credentials.json:/root/.claude/.credentials.json:ro,Z" \
-        -v "$HOME/.claude/agents:/root/.claude/agents:ro,Z" \
-        -v "$HOME/.claude/commands:/root/.claude/commands:ro,Z" \
-        -v "$HOME/.claude/CLAUDE.md:/root/.claude/CLAUDE.md:ro,Z" \
+        -v "$HOME/.claude/.credentials.json:/home/developer/.claude/.credentials.json:ro,Z" \
+        -v "$HOME/.claude/agents:/home/developer/.claude/agents:ro,Z" \
+        -v "$HOME/.claude/commands:/home/developer/.claude/commands:ro,Z" \
+        -v "$HOME/.claude/CLAUDE.md:/home/developer/.claude/CLAUDE.md:ro,Z" \
         -e "GITHUB_TOKEN=$(gh auth token)" \
         $port_args \
         "$container_name" \
-        bash -c "cp /tmp/host-claude.json /root/.claude.json && sleep infinity")
+        bash -c "cp /tmp/host-claude.json /home/developer/.claude.json && sudo chown -R developer:developer /workspace && sleep infinity")
     
     # Update environments file
     local environments
@@ -632,7 +659,7 @@ cmd_delete() {
     
     # Stop and remove container
     log_info "Stopping container..."
-    $runtime exec "$container_name" pkill -f "sleep infinity" >/dev/null 2>&1 || true
+    $runtime exec --user developer "$container_name" pkill -f "sleep infinity" >/dev/null 2>&1 || true
     $runtime stop -t 0 "$container_name" >/dev/null 2>&1 || true
     $runtime rm "$container_name" >/dev/null 2>&1 || true
     
@@ -643,7 +670,18 @@ cmd_delete() {
     # Remove worktree
     if [[ -d "$worktree_path" ]]; then
         log_info "Removing worktree..."
-        git worktree remove "$worktree_path" --force
+        # Try git worktree remove first
+        if ! git worktree remove "$worktree_path" --force 2>/dev/null; then
+            # If that fails due to permissions, use podman unshare (for rootless podman) or container cleanup
+            if [[ "$runtime" == "podman" ]] && command -v podman >/dev/null 2>&1; then
+                podman unshare rm -rf "$worktree_path" 2>/dev/null || {
+                    log_warn "Could not remove worktree directory with standard methods. Manual cleanup may be required: $worktree_path"
+                }
+            else
+                # For docker or if podman unshare fails, warn the user
+                log_warn "Could not remove worktree directory. Manual cleanup may be required: $worktree_path"
+            fi
+        fi
     fi
     
     # Update environments file
@@ -692,8 +730,8 @@ cmd_terminal() {
     
     log_info "Opening terminal in environment '$env_name'"
     
-    # Execute interactive shell in container
-    exec $runtime exec -it "$container_name" bash
+    # Execute interactive shell in container as the developer user
+    exec $runtime exec -it --user developer "$container_name" bash
 }
 
 # Main function
