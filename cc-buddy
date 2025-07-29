@@ -559,13 +559,13 @@ cmd_create() {
         -v "$volume_name:/data" \
         -v "$HOME/.claude.json:/tmp/host-claude.json:ro,Z" \
         -v "$HOME/.claude/.credentials.json:/tmp/host-credentials.json:ro,Z" \
-        -v "$HOME/.claude/agents:/home/developer/.claude/agents:ro,Z" \
-        -v "$HOME/.claude/commands:/home/developer/.claude/commands:ro,Z" \
+        -v "$HOME/.claude/agents:/tmp/host-agents:ro,Z" \
+        -v "$HOME/.claude/commands:/tmp/host-commands:ro,Z" \
         -v "$HOME/.claude/CLAUDE.md:/home/developer/.claude/CLAUDE.md:ro,Z" \
         -e "GITHUB_TOKEN=$(gh auth token)" \
         $port_args \
         "$container_name" \
-        bash -c "cp /tmp/host-claude.json /home/developer/.claude.json && sudo cp /tmp/host-credentials.json /home/developer/.claude/.credentials.json && sudo chown -R developer:developer /workspace && chown developer:developer /home/developer/.claude.json && sudo chown developer:developer /home/developer/.claude/.credentials.json && git config --global --add safe.directory /workspace && python3 -c '
+        bash -c "cp /tmp/host-claude.json /home/developer/.claude.json && sudo cp /tmp/host-credentials.json /home/developer/.claude/.credentials.json && sudo cp -r /tmp/host-commands /home/developer/.claude/commands && sudo cp -r /tmp/host-agents /home/developer/.claude/agents && sudo chown -R developer:developer /workspace && chown developer:developer /home/developer/.claude.json && sudo chown developer:developer /home/developer/.claude/.credentials.json && sudo chown -R developer:developer /home/developer/.claude/commands && sudo chown -R developer:developer /home/developer/.claude/agents && git config --global --add safe.directory /workspace && python3 -c '
 import json
 import os
 config_file = \"/home/developer/.claude.json\"
