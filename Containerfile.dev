@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y \
     npm \
     jq \
     sudo \
+    python3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Claude Code CLI
