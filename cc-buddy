@@ -21,6 +21,7 @@ CONTAINERFILE=""
 RUNTIME=""
 EXPOSE_ALL=false
 LAUNCH_TERMINAL=false
+FORCE=false
 COMMAND=""
 BRANCH_NAME=""
 ENVIRONMENT_NAME=""
@@ -58,6 +59,7 @@ USAGE:
     cc-buddy <command> [options] [arguments]
 
 COMMANDS:
+    init                    Create Containerfile.dev in current directory
     create <branch-name>    Create new development environment
     list                    List all active environments
     delete <env-name>       Delete development environment
@@ -69,10 +71,13 @@ OPTIONS:
     --runtime <docker|podman>  Override container runtime
     --expose-all            Publish all container ports to host
     --terminal, -t          Launch terminal after environment creation
+    --force                 Force overwrite existing files (init command only)
     -h, --help              Show this help message
     -v, --version           Show version information
 
 EXAMPLES:
+    cc-buddy init
+    cc-buddy init --force
     cc-buddy create feature-branch
     cc-buddy create origin/feature-branch --expose-all
     cc-buddy create feature-branch --terminal
@@ -91,7 +96,7 @@ EOF
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case $1 in
-            create|list|delete|terminal)
+            init|create|list|delete|terminal)
                 COMMAND="$1"
                 shift
                 if [[ "$COMMAND" == "create" || "$COMMAND" == "delete" || "$COMMAND" == "terminal" ]] && [[ $# -gt 0 && ! "$1" =~ ^-- ]]; then
@@ -125,6 +130,10 @@ parse_args() {
                 ;;
             --terminal|-t)
                 LAUNCH_TERMINAL=true
+                shift
+                ;;
+            --force)
+                FORCE=true
                 shift
                 ;;
             -h|--help)
@@ -379,6 +388,57 @@ create_branch_if_needed() {
     git branch "$branch"
     
     return 0
+}
+
+# Init command implementation
+cmd_init() {
+    local containerfile_path="./Containerfile.dev"
+    
+    # Check if file exists and handle --force flag
+    if [[ -f "$containerfile_path" && "$FORCE" != true ]]; then
+        log_error "Containerfile.dev already exists. Use --force to overwrite."
+        exit 1
+    fi
+    
+    log_info "Creating Containerfile.dev..."
+    
+    # Create the Containerfile.dev content
+    cat > "$containerfile_path" << 'EOF'
+FROM debian:bookworm
+
+RUN apt-get update && apt-get install -y \
+    git \
+    curl \
+    wget \
+    vim \
+    build-essential \
+    procps \
+    ca-certificates \
+    nodejs \
+    npm \
+    jq \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Claude Code CLI
+RUN npm install -g @anthropic-ai/claude-code
+
+# Install GitHub CLI
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+    && apt-get update \
+    && apt-get install gh -y
+
+# Create directory for Claude Code configuration (mounted at runtime)
+RUN mkdir -p /root/.claude
+
+WORKDIR /workspace
+
+CMD ["/bin/bash"]
+EOF
+    
+    log_success "Containerfile.dev created successfully"
+    log_info "You can now run: cc-buddy create <branch-name>"
 }
 
 # Create command implementation
@@ -641,6 +701,9 @@ main() {
     parse_args "$@"
     
     case "$COMMAND" in
+        init)
+            cmd_init
+            ;;
         create)
             cmd_create
             ;;

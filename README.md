@@ -15,6 +15,9 @@ Perfect for:
 ## Quick Start
 
 ```bash
+# Initialize a new project (creates Containerfile.dev)
+./cc-buddy init
+
 # Create a new development environment
 ./cc-buddy create feature-branch
 
@@ -42,6 +45,7 @@ Perfect for:
 cc-buddy <command> [options]
 
 Commands:
+  init                Create Containerfile.dev in current directory
   create <branch>     Create new development environment
   list               List all active environments  
   delete <env-name>  Delete development environment
@@ -53,6 +57,7 @@ Options:
   --runtime <docker|podman>  Override container runtime
   --expose-all              Publish all container ports
   --terminal, -t            Launch terminal after creation
+  --force                   Force overwrite existing files (init only)
 ```
 
 ## Requirements
