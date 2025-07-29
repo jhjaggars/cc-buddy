@@ -424,6 +424,7 @@ RUN apt-get update && apt-get install -y \
     npm \
     jq \
     sudo \
+    python3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Claude Code CLI
@@ -557,14 +558,29 @@ cmd_create() {
         -v "$ORIGINAL_DIR/.git:$ORIGINAL_DIR/.git:Z" \
         -v "$volume_name:/data" \
         -v "$HOME/.claude.json:/tmp/host-claude.json:ro,Z" \
-        -v "$HOME/.claude/.credentials.json:/home/developer/.claude/.credentials.json:ro,Z" \
+        -v "$HOME/.claude/.credentials.json:/tmp/host-credentials.json:ro,Z" \
         -v "$HOME/.claude/agents:/home/developer/.claude/agents:ro,Z" \
         -v "$HOME/.claude/commands:/home/developer/.claude/commands:ro,Z" \
         -v "$HOME/.claude/CLAUDE.md:/home/developer/.claude/CLAUDE.md:ro,Z" \
         -e "GITHUB_TOKEN=$(gh auth token)" \
         $port_args \
         "$container_name" \
-        bash -c "cp /tmp/host-claude.json /home/developer/.claude.json && sudo chown -R developer:developer /workspace && sleep infinity")
+        bash -c "cp /tmp/host-claude.json /home/developer/.claude.json && sudo cp /tmp/host-credentials.json /home/developer/.claude/.credentials.json && sudo chown -R developer:developer /workspace && chown developer:developer /home/developer/.claude.json && sudo chown developer:developer /home/developer/.claude/.credentials.json && git config --global --add safe.directory /workspace && python3 -c '
+import json
+import os
+config_file = \"/home/developer/.claude.json\"
+if os.path.exists(config_file):
+    with open(config_file, \"r\") as f:
+        config = json.load(f)
+    if \"trustedWorkspaces\" not in config:
+        config[\"trustedWorkspaces\"] = {}
+    config[\"trustedWorkspaces\"][\"/workspace\"] = {
+        \"allowedTools\": [],
+        \"hasTrustDialogAccepted\": True
+    }
+    with open(config_file, \"w\") as f:
+        json.dump(config, f, indent=2)
+' && sleep infinity")
     
     # Update environments file
     local environments
