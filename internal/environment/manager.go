@@ -1,0 +1,351 @@
+package environment
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
+
+	"github.com/jhjaggars/cc-buddy/internal/config"
+	"github.com/jhjaggars/cc-buddy/internal/container"
+)
+
+// Manager orchestrates environment creation, management, and cleanup
+type Manager struct {
+	configMgr     *config.Manager
+	containerMgr  *container.Manager
+	gitOps        *GitOperations
+}
+
+// NewManager creates a new environment manager
+func NewManager() (*Manager, error) {
+	configMgr, err := config.NewManager()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create config manager: %w", err)
+	}
+	
+	// Load existing configuration
+	if err := configMgr.LoadConfig(); err != nil {
+		return nil, fmt.Errorf("failed to load config: %w", err)
+	}
+	
+	if err := configMgr.LoadState(); err != nil {
+		return nil, fmt.Errorf("failed to load state: %w", err)
+	}
+	
+	// Initialize container manager based on config
+	var containerMgr *container.Manager
+	cfg := configMgr.GetConfig()
+	if cfg.Runtime == "auto" {
+		containerMgr, err = container.NewManager()
+	} else {
+		containerMgr, err = container.NewManagerWithRuntime(cfg.Runtime)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to create container manager: %w", err)
+	}
+	
+	// Initialize git operations
+	gitOps, err := NewGitOperations()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create git operations: %w", err)
+	}
+	
+	return &Manager{
+		configMgr:    configMgr,
+		containerMgr: containerMgr,
+		gitOps:       gitOps,
+	}, nil
+}
+
+// CreateEnvironmentOptions holds options for environment creation
+type CreateEnvironmentOptions struct {
+	BranchName      string
+	IsRemoteBranch  bool
+	RemoteName      string
+	WorktreeDir     string
+	Containerfile   string
+	ExposeAllPorts  bool
+}
+
+// CreateEnvironment creates a new development environment
+func (m *Manager) CreateEnvironment(ctx context.Context, opts CreateEnvironmentOptions) (*config.Environment, error) {
+	// Generate environment name
+	envName, err := m.gitOps.GenerateEnvironmentName(opts.BranchName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate environment name: %w", err)
+	}
+	
+	// Check if environment already exists
+	if _, err := m.configMgr.GetEnvironment(envName); err == nil {
+		return nil, fmt.Errorf("environment %s already exists", envName)
+	}
+	
+	// Set up default options
+	if opts.WorktreeDir == "" {
+		opts.WorktreeDir = m.configMgr.GetConfig().WorktreeDir
+	}
+	if opts.Containerfile == "" {
+		opts.Containerfile = m.configMgr.GetConfig().Containerfile
+	}
+	
+	// Create worktree path
+	worktreePath := filepath.Join(opts.WorktreeDir, envName)
+	
+	// Create the environment step by step
+	env := &config.Environment{
+		Name:          envName,
+		Branch:        opts.BranchName,
+		WorktreePath:  worktreePath,
+		ContainerName: fmt.Sprintf("cc-buddy-%s", envName),
+		VolumeName:    fmt.Sprintf("cc-buddy-%s-data", envName),
+		Created:       time.Now(),
+		Status:        "creating",
+	}
+	
+	// Add to state early for tracking
+	if err := m.configMgr.AddEnvironment(*env); err != nil {
+		return nil, fmt.Errorf("failed to add environment to state: %w", err)
+	}
+	
+	// Cleanup on failure
+	defer func() {
+		if err != nil {
+			m.CleanupEnvironment(ctx, envName)
+		}
+	}()
+	
+	// Step 1: Handle branch creation/validation
+	if opts.IsRemoteBranch {
+		// Fetch remote updates first
+		if err := m.gitOps.FetchRemote(ctx, opts.RemoteName); err != nil {
+			return nil, fmt.Errorf("failed to fetch remote %s: %w", opts.RemoteName, err)
+		}
+		
+		// Check if remote branch exists
+		exists, err := m.gitOps.RemoteBranchExists(ctx, opts.RemoteName, opts.BranchName)
+		if err != nil {
+			return nil, fmt.Errorf("failed to check remote branch: %w", err)
+		}
+		if !exists {
+			return nil, fmt.Errorf("remote branch %s/%s does not exist", opts.RemoteName, opts.BranchName)
+		}
+	} else {
+		// Check if local branch exists
+		exists, err := m.gitOps.BranchExists(ctx, opts.BranchName)
+		if err != nil {
+			return nil, fmt.Errorf("failed to check local branch: %w", err)
+		}
+		if !exists {
+			// Create new branch
+			if err := m.gitOps.CreateBranch(ctx, opts.BranchName); err != nil {
+				return nil, fmt.Errorf("failed to create branch: %w", err)
+			}
+		}
+	}
+	
+	// Step 2: Create git worktree
+	var remoteBranch string
+	if opts.IsRemoteBranch {
+		remoteBranch = fmt.Sprintf("%s/%s", opts.RemoteName, opts.BranchName)
+	}
+	
+	if err := m.gitOps.CreateWorktree(ctx, worktreePath, opts.BranchName, remoteBranch); err != nil {
+		return nil, fmt.Errorf("failed to create worktree: %w", err)
+	}
+	
+	// Step 3: Check for containerfile
+	containerfilePath := filepath.Join(worktreePath, opts.Containerfile)
+	if _, err := os.Stat(containerfilePath); os.IsNotExist(err) {
+		return nil, fmt.Errorf("containerfile not found: %s", containerfilePath)
+	}
+	
+	// Step 4: Build container image
+	imageTag := fmt.Sprintf("cc-buddy-%s:latest", envName)
+	buildOpts := container.BuildOptions{
+		Context:    worktreePath,
+		Dockerfile: opts.Containerfile,
+		Tags:       []string{imageTag},
+	}
+	
+	if err := m.containerMgr.GetRuntime().Build(ctx, buildOpts); err != nil {
+		return nil, fmt.Errorf("failed to build container image: %w", err)
+	}
+	
+	// Step 5: Create named volume
+	if err := m.containerMgr.GetRuntime().CreateVolume(ctx, env.VolumeName); err != nil {
+		return nil, fmt.Errorf("failed to create volume: %w", err)
+	}
+	
+	// Step 6: Start container
+	runOpts := container.RunOptions{
+		Name:       env.ContainerName,
+		Image:      imageTag,
+		WorkingDir: "/workspace",
+		Detach:     true,
+		Mounts: []container.Mount{
+			{
+				Type:   "bind",
+				Source: worktreePath,
+				Target: "/workspace",
+			},
+			{
+				Type:   "volume",
+				Source: env.VolumeName,
+				Target: "/data",
+			},
+		},
+		EnvVars: map[string]string{
+			"GITHUB_TOKEN": os.Getenv("GITHUB_TOKEN"),
+		},
+	}
+	
+	// Add port mappings if requested
+	if opts.ExposeAllPorts {
+		runOpts.Ports = []container.PortMapping{
+			{Host: 0, Container: 0, Protocol: "tcp"}, // Expose all ports
+		}
+	}
+	
+	containerID, err := m.containerMgr.GetRuntime().Run(ctx, runOpts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to start container: %w", err)
+	}
+	
+	// Step 7: Update environment with container info and mark as running
+	env.ContainerID = containerID
+	env.Status = "running"
+	
+	if err := m.configMgr.UpdateEnvironment(envName, func(e *config.Environment) {
+		*e = *env
+	}); err != nil {
+		return nil, fmt.Errorf("failed to update environment state: %w", err)
+	}
+	
+	return env, nil
+}
+
+// ListEnvironments returns all environments with their current status
+func (m *Manager) ListEnvironments(ctx context.Context) ([]config.Environment, error) {
+	environments := m.configMgr.GetState().Environments
+	
+	// Update status for each environment
+	for i := range environments {
+		if environments[i].ContainerID != "" {
+			status, err := m.containerMgr.GetRuntime().Status(ctx, environments[i].ContainerID)
+			if err == nil && status.Running {
+				environments[i].Status = "running"
+			} else {
+				environments[i].Status = "stopped"
+			}
+		}
+	}
+	
+	return environments, nil
+}
+
+// DeleteEnvironment removes an environment and cleans up all resources
+func (m *Manager) DeleteEnvironment(ctx context.Context, envName string) error {
+	_, err := m.configMgr.GetEnvironment(envName)
+	if err != nil {
+		return fmt.Errorf("environment not found: %w", err)
+	}
+	
+	return m.CleanupEnvironment(ctx, envName)
+}
+
+// CleanupEnvironment performs cleanup of environment resources
+func (m *Manager) CleanupEnvironment(ctx context.Context, envName string) error {
+	env, err := m.configMgr.GetEnvironment(envName)
+	if err != nil {
+		// Environment not in state, but try to clean up anyway
+		env = config.Environment{Name: envName}
+	}
+	
+	var cleanupErrors []error
+	
+	// Stop and remove container
+	if env.ContainerID != "" {
+		if err := m.containerMgr.GetRuntime().Stop(ctx, env.ContainerID); err != nil {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("failed to stop container: %w", err))
+		}
+		
+		if err := m.containerMgr.GetRuntime().Remove(ctx, env.ContainerID); err != nil {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("failed to remove container: %w", err))
+		}
+	} else if env.ContainerName != "" {
+		// Try with container name
+		if err := m.containerMgr.GetRuntime().Stop(ctx, env.ContainerName); err != nil {
+			// Might already be stopped, continue
+		}
+		if err := m.containerMgr.GetRuntime().Remove(ctx, env.ContainerName); err != nil {
+			// Might already be removed, continue
+		}
+	}
+	
+	// Remove volume
+	if env.VolumeName != "" {
+		if err := m.containerMgr.GetRuntime().RemoveVolume(ctx, env.VolumeName); err != nil {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("failed to remove volume: %w", err))
+		}
+	}
+	
+	// Remove worktree
+	if env.WorktreePath != "" {
+		if err := m.gitOps.RemoveWorktree(ctx, env.WorktreePath); err != nil {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("failed to remove worktree: %w", err))
+		}
+	}
+	
+	// Remove from state
+	if err := m.configMgr.RemoveEnvironment(envName); err != nil {
+		cleanupErrors = append(cleanupErrors, fmt.Errorf("failed to remove from state: %w", err))
+	}
+	
+	if len(cleanupErrors) > 0 {
+		return fmt.Errorf("cleanup errors: %v", cleanupErrors)
+	}
+	
+	return nil
+}
+
+// OpenTerminal opens a terminal session in the environment's container
+func (m *Manager) OpenTerminal(ctx context.Context, envName string) error {
+	env, err := m.configMgr.GetEnvironment(envName)
+	if err != nil {
+		return fmt.Errorf("environment not found: %w", err)
+	}
+	
+	if env.ContainerID == "" {
+		return fmt.Errorf("environment %s has no running container", envName)
+	}
+	
+	// Check container status
+	status, err := m.containerMgr.GetRuntime().Status(ctx, env.ContainerID)
+	if err != nil {
+		return fmt.Errorf("failed to check container status: %w", err)
+	}
+	
+	if !status.Running {
+		return fmt.Errorf("container for environment %s is not running", envName)
+	}
+	
+	// Open terminal
+	return m.containerMgr.GetRuntime().Exec(ctx, env.ContainerID, []string{"/bin/bash"})
+}
+
+// GetConfig returns the configuration manager
+func (m *Manager) GetConfig() *config.Manager {
+	return m.configMgr
+}
+
+// GetContainerManager returns the container manager
+func (m *Manager) GetContainerManager() *container.Manager {
+	return m.containerMgr
+}
+
+// GetGitOperations returns the git operations
+func (m *Manager) GetGitOperations() *GitOperations {
+	return m.gitOps
+}
