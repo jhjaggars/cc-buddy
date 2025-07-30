@@ -23,17 +23,36 @@ func main() {
 	}
 
 	// TUI mode
-	mainModel := models.NewMainModel()
-	p := tea.NewProgram(mainModel, tea.WithAltScreen())
-	
-	// Set up signal handling
-	mainModel.SetProgram(p)
-	
-	// Cleanup on exit
-	defer mainModel.Cleanup()
-	
-	if _, err := p.Run(); err != nil {
-		log.Fatalf("Error running program: %v", err)
+	for {
+		mainModel := models.NewMainModel()
+		p := tea.NewProgram(mainModel, tea.WithAltScreen())
+		
+		// Set up signal handling
+		mainModel.SetProgram(p)
+		
+		// Run the TUI
+		model, err := p.Run()
+		if err != nil {
+			log.Fatalf("Error running program: %v", err)
+		}
+		
+		// Check if we need to launch a terminal
+		finalModel := model.(*models.MainModel)
+		terminalEnv := finalModel.GetTerminalEnvironment()
+		finalModel.Cleanup()
+		
+		if terminalEnv != "" {
+			// Launch terminal and restart TUI when done
+			if err := launchTerminal(terminalEnv); err != nil {
+				fmt.Fprintf(os.Stderr, "Error opening terminal: %v\n", err)
+				fmt.Println("Press Enter to continue...")
+				fmt.Scanln()
+			}
+			// Continue the loop to restart TUI
+		} else {
+			// Normal quit, exit the loop
+			break
+		}
 	}
 }
 
@@ -97,6 +116,33 @@ func handleCLIMode(args []string) error {
 	default:
 		return fmt.Errorf("unknown command: %s\nRun 'cc-buddy help' for usage information", command)
 	}
+}
+
+// launchTerminal opens a terminal for the specified environment
+func launchTerminal(envName string) error {
+	ctx := context.Background()
+	envManager, err := environment.NewManager()
+	if err != nil {
+		return fmt.Errorf("failed to initialize: %w", err)
+	}
+	
+	// Check if environment exists
+	env, err := envManager.GetConfig().GetEnvironment(envName)
+	if err != nil {
+		return fmt.Errorf("environment '%s' not found", envName)
+	}
+
+	fmt.Printf("Opening terminal for environment '%s'...\n", envName)
+	fmt.Printf("Container: %s\n", env.ContainerName)
+	fmt.Printf("Working directory: /workspace\n")
+	fmt.Println()
+
+	// Open terminal
+	if err := envManager.OpenTerminal(ctx, envName); err != nil {
+		return fmt.Errorf("failed to open terminal: %w", err)
+	}
+
+	return nil
 }
 
 func printHelp() {

@@ -36,6 +36,9 @@ type MainModel struct {
 	// Operation management
 	operationManager    *utils.OperationManager
 	signalHandler       *utils.SignalHandler
+	
+	// Terminal launch state
+	terminalEnvName     string
 }
 
 // NewMainModel creates a new main model
@@ -119,6 +122,11 @@ func (m *MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, func() tea.Msg { return RefreshEnvironmentsMsg{} }
 		}
 		return m, nil
+
+	case OpenTerminalMsg:
+		// Store environment name and quit to launch terminal
+		m.terminalEnvName = msg.Environment
+		return m, tea.Quit
 
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -311,6 +319,11 @@ func (m *MainModel) ShowProgress(title string, steps []string) {
 func (m *MainModel) ShowConfirmation(title, message string, details []string) {
 	m.confirmationModel = NewConfirmationModel(title, message, details)
 	m.currentView = ConfirmationView
+}
+
+// GetTerminalEnvironment returns the environment name for terminal launch
+func (m *MainModel) GetTerminalEnvironment() string {
+	return m.terminalEnvName
 }
 
 // Cleanup performs cleanup when the model is destroyed
