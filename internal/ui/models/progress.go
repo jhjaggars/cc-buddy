@@ -12,15 +12,17 @@ import (
 
 // ProgressModel displays progress for long-running operations
 type ProgressModel struct {
-	progress    progress.Model
-	title       string
-	steps       []ProgressStep
-	currentStep int
-	width       int
-	height      int
-	startTime   time.Time
-	completed   bool
-	err         error
+	progress     progress.Model
+	title        string
+	steps        []ProgressStep
+	currentStep  int
+	width        int
+	height       int
+	startTime    time.Time
+	completed    bool
+	err          error
+	cancelled    bool
+	cancelFunc   func() error // Function to call when cancellation is requested
 }
 
 // ProgressStep represents a single step in a multi-step operation
@@ -51,8 +53,18 @@ type ProgressUpdateMsg struct {
 	Completed   bool
 }
 
+// ProgressCancelMsg is sent when cancellation is requested
+type ProgressCancelMsg struct {
+	Error error
+}
+
 // NewProgressModel creates a new progress model
 func NewProgressModel(title string, steps []string) *ProgressModel {
+	return NewProgressModelWithCancel(title, steps, nil)
+}
+
+// NewProgressModelWithCancel creates a new progress model with cancellation support
+func NewProgressModelWithCancel(title string, steps []string, cancelFunc func() error) *ProgressModel {
 	p := progress.New(progress.WithDefaultGradient())
 	p.Width = 50
 	
@@ -65,10 +77,11 @@ func NewProgressModel(title string, steps []string) *ProgressModel {
 	}
 	
 	return &ProgressModel{
-		progress:  p,
-		title:     title,
-		steps:     progressSteps,
-		startTime: time.Now(),
+		progress:   p,
+		title:      title,
+		steps:      progressSteps,
+		startTime:  time.Now(),
+		cancelFunc: cancelFunc,
 	}
 }
 
@@ -102,7 +115,9 @@ func (m *ProgressModel) Update(msg tea.Msg) (*ProgressModel, tea.Cmd) {
 			} else if msg.Completed {
 				step.Status = StepCompleted
 				step.Progress = 1.0
-				m.completed = msg.Completed
+				if msg.StepIndex == len(m.steps)-1 {
+					m.completed = true
+				}
 			} else {
 				step.Status = StepInProgress
 				step.Progress = msg.Progress
@@ -114,10 +129,24 @@ func (m *ProgressModel) Update(msg tea.Msg) (*ProgressModel, tea.Cmd) {
 			m.currentStep = msg.StepIndex
 		}
 		
+	case ProgressCancelMsg:
+		m.cancelled = true
+		if msg.Error != nil {
+			m.err = msg.Error
+		}
+		
 	case tea.KeyMsg:
-		if msg.String() == "ctrl+c" && !m.completed {
-			// TODO: Implement cancellation
-			return m, tea.Quit
+		if msg.String() == "ctrl+c" && !m.completed && !m.cancelled {
+			// Request cancellation
+			if m.cancelFunc != nil {
+				return m, func() tea.Msg {
+					err := m.cancelFunc()
+					return ProgressCancelMsg{Error: err}
+				}
+			} else {
+				// No cancel function provided, just quit
+				return m, tea.Quit
+			}
 		}
 	}
 	
@@ -168,7 +197,18 @@ func (m *ProgressModel) View() string {
 	// Footer
 	b.WriteString("\n")
 	
-	if m.err != nil {
+	if m.cancelled {
+		cancelStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("214")).
+			Bold(true)
+		elapsed := time.Since(m.startTime).Round(time.Second)
+		if m.err != nil {
+			b.WriteString(cancelStyle.Render(fmt.Sprintf("❌ Cancelled (%v) - %v", elapsed, m.err)))
+		} else {
+			b.WriteString(cancelStyle.Render(fmt.Sprintf("❌ Cancelled after %v", elapsed)))
+		}
+		b.WriteString("\n\n[enter] continue")
+	} else if m.err != nil {
 		errorStyle := lipgloss.NewStyle().
 			Foreground(lipgloss.Color("196")).
 			Bold(true)
@@ -263,4 +303,26 @@ func (m *ProgressModel) FailStep(stepIndex int, err error) tea.Cmd {
 			Error:     err,
 		}
 	}
+}
+
+// Cancel sends a cancellation message
+func (m *ProgressModel) Cancel(err error) tea.Cmd {
+	return func() tea.Msg {
+		return ProgressCancelMsg{Error: err}
+	}
+}
+
+// IsCancelled returns whether the operation has been cancelled
+func (m *ProgressModel) IsCancelled() bool {
+	return m.cancelled
+}
+
+// IsCompleted returns whether the operation has completed
+func (m *ProgressModel) IsCompleted() bool {
+	return m.completed
+}
+
+// HasError returns whether there was an error
+func (m *ProgressModel) HasError() bool {
+	return m.err != nil
 }

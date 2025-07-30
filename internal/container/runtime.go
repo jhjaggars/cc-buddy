@@ -89,6 +89,9 @@ type Runtime interface {
 	
 	// RemoveVolume removes a named volume
 	RemoveVolume(ctx context.Context, name string) error
+	
+	// RemoveImage removes a container image
+	RemoveImage(ctx context.Context, imageID string) error
 }
 
 // Manager manages container runtime detection and operations
@@ -336,6 +339,10 @@ func (r *PodmanRuntime) RemoveVolume(ctx context.Context, name string) error {
 	return r.execCommandStreaming(ctx, "volume", "rm", name)
 }
 
+func (r *PodmanRuntime) RemoveImage(ctx context.Context, imageID string) error {
+	return r.execCommandStreaming(ctx, "rmi", imageID)
+}
+
 // DockerRuntime implements Runtime for Docker
 type DockerRuntime struct {
 	baseRuntime
@@ -499,4 +506,8 @@ func (r *DockerRuntime) CreateVolume(ctx context.Context, name string) error {
 
 func (r *DockerRuntime) RemoveVolume(ctx context.Context, name string) error {
 	return r.execCommandStreaming(ctx, "volume", "rm", name)
+}
+
+func (r *DockerRuntime) RemoveImage(ctx context.Context, imageID string) error {
+	return r.execCommandStreaming(ctx, "rmi", imageID)
 }

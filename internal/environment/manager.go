@@ -71,7 +71,7 @@ type CreateEnvironmentOptions struct {
 }
 
 // CreateEnvironment creates a new development environment
-func (m *Manager) CreateEnvironment(ctx context.Context, opts CreateEnvironmentOptions) (*config.Environment, error) {
+func (m *Manager) CreateEnvironment(ctx context.Context, opts CreateEnvironmentOptions) (retEnv *config.Environment, retErr error) {
 	// Generate environment name
 	envName, err := m.gitOps.GenerateEnvironmentName(opts.BranchName)
 	if err != nil {
@@ -94,6 +94,19 @@ func (m *Manager) CreateEnvironment(ctx context.Context, opts CreateEnvironmentO
 	// Create worktree path
 	worktreePath := filepath.Join(opts.WorktreeDir, envName)
 	
+	// Track resources for cleanup
+	type cleanupState struct {
+		environmentInState bool
+		branchCreated     bool
+		worktreeCreated   bool
+		imageBuilt        bool
+		volumeCreated     bool
+		containerStarted  bool
+		imageName         string
+	}
+	
+	cleanup := &cleanupState{}
+	
 	// Create the environment step by step
 	env := &config.Environment{
 		Name:          envName,
@@ -105,15 +118,51 @@ func (m *Manager) CreateEnvironment(ctx context.Context, opts CreateEnvironmentO
 		Status:        "creating",
 	}
 	
-	// Add to state early for tracking
-	if err := m.configMgr.AddEnvironment(*env); err != nil {
-		return nil, fmt.Errorf("failed to add environment to state: %w", err)
-	}
-	
-	// Cleanup on failure
+	// Enhanced cleanup on failure - preserves original error
 	defer func() {
-		if err != nil {
-			m.CleanupEnvironment(ctx, envName)
+		if retErr != nil {
+			// Perform granular cleanup in reverse order of creation
+			if cleanup.containerStarted && env.ContainerID != "" {
+				if stopErr := m.containerMgr.GetRuntime().Stop(ctx, env.ContainerID); stopErr != nil {
+					// Log but don't override original error
+					fmt.Printf("Warning: Failed to stop container during cleanup: %v\n", stopErr)
+				}
+				if removeErr := m.containerMgr.GetRuntime().Remove(ctx, env.ContainerID); removeErr != nil {
+					fmt.Printf("Warning: Failed to remove container during cleanup: %v\n", removeErr)
+				}
+			}
+			
+			if cleanup.volumeCreated {
+				if removeErr := m.containerMgr.GetRuntime().RemoveVolume(ctx, env.VolumeName); removeErr != nil {
+					fmt.Printf("Warning: Failed to remove volume during cleanup: %v\n", removeErr)
+				}
+			}
+			
+			if cleanup.imageBuilt && cleanup.imageName != "" {
+				if removeErr := m.containerMgr.GetRuntime().RemoveImage(ctx, cleanup.imageName); removeErr != nil {
+					// Image removal might fail if container still exists, that's okay
+					fmt.Printf("Warning: Failed to remove image during cleanup: %v\n", removeErr)
+				}
+			}
+			
+			if cleanup.worktreeCreated {
+				if removeErr := m.gitOps.RemoveWorktree(ctx, worktreePath); removeErr != nil {
+					fmt.Printf("Warning: Failed to remove worktree during cleanup: %v\n", removeErr)
+				}
+			}
+			
+			if cleanup.branchCreated {
+				// Only remove branch if we created it (not if it already existed)
+				if deleteErr := m.gitOps.DeleteBranch(ctx, opts.BranchName); deleteErr != nil {
+					fmt.Printf("Warning: Failed to remove created branch during cleanup: %v\n", deleteErr)
+				}
+			}
+			
+			if cleanup.environmentInState {
+				if removeErr := m.configMgr.RemoveEnvironment(envName); removeErr != nil {
+					fmt.Printf("Warning: Failed to remove environment from state during cleanup: %v\n", removeErr)
+				}
+			}
 		}
 	}()
 	
@@ -143,6 +192,7 @@ func (m *Manager) CreateEnvironment(ctx context.Context, opts CreateEnvironmentO
 			if err := m.gitOps.CreateBranch(ctx, opts.BranchName); err != nil {
 				return nil, fmt.Errorf("failed to create branch: %w", err)
 			}
+			cleanup.branchCreated = true
 		}
 	}
 	
@@ -155,6 +205,7 @@ func (m *Manager) CreateEnvironment(ctx context.Context, opts CreateEnvironmentO
 	if err := m.gitOps.CreateWorktree(ctx, worktreePath, opts.BranchName, remoteBranch); err != nil {
 		return nil, fmt.Errorf("failed to create worktree: %w", err)
 	}
+	cleanup.worktreeCreated = true
 	
 	// Step 3: Check for containerfile
 	containerfilePath := filepath.Join(worktreePath, opts.Containerfile)
@@ -173,11 +224,14 @@ func (m *Manager) CreateEnvironment(ctx context.Context, opts CreateEnvironmentO
 	if err := m.containerMgr.GetRuntime().Build(ctx, buildOpts); err != nil {
 		return nil, fmt.Errorf("failed to build container image: %w", err)
 	}
+	cleanup.imageBuilt = true
+	cleanup.imageName = imageTag
 	
 	// Step 5: Create named volume
 	if err := m.containerMgr.GetRuntime().CreateVolume(ctx, env.VolumeName); err != nil {
 		return nil, fmt.Errorf("failed to create volume: %w", err)
 	}
+	cleanup.volumeCreated = true
 	
 	// Step 6: Start container
 	mounts := []container.Mount{
@@ -225,16 +279,17 @@ func (m *Manager) CreateEnvironment(ctx context.Context, opts CreateEnvironmentO
 	if err != nil {
 		return nil, fmt.Errorf("failed to start container: %w", err)
 	}
+	cleanup.containerStarted = true
 	
 	// Step 7: Update environment with container info and mark as running
 	env.ContainerID = containerID
 	env.Status = "running"
 	
-	if err := m.configMgr.UpdateEnvironment(envName, func(e *config.Environment) {
-		*e = *env
-	}); err != nil {
-		return nil, fmt.Errorf("failed to update environment state: %w", err)
+	// Add environment to state only after all resources are successfully created
+	if err := m.configMgr.AddEnvironment(*env); err != nil {
+		return nil, fmt.Errorf("failed to add environment to state: %w", err)
 	}
+	cleanup.environmentInState = true
 	
 	return env, nil
 }
@@ -295,6 +350,13 @@ func (m *Manager) CleanupEnvironment(ctx context.Context, envName string) error 
 		if err := m.containerMgr.GetRuntime().Remove(ctx, env.ContainerName); err != nil {
 			// Might already be removed, continue
 		}
+	}
+	
+	// Remove container image
+	imageTag := fmt.Sprintf("cc-buddy-%s:latest", envName)
+	if err := m.containerMgr.GetRuntime().RemoveImage(ctx, imageTag); err != nil {
+		// Image removal might fail if other containers are using it, that's okay
+		// Don't add to cleanupErrors as this is not critical
 	}
 	
 	// Remove volume

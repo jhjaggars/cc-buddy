@@ -126,6 +126,46 @@ func (g *GitOperations) CreateBranch(ctx context.Context, branchName string) err
 	return nil
 }
 
+// DeleteBranch deletes a local branch
+func (g *GitOperations) DeleteBranch(ctx context.Context, branchName string) error {
+	// Validate branch name
+	if err := validateBranchName(branchName); err != nil {
+		return err
+	}
+	
+	// Check if branch exists
+	exists, err := g.BranchExists(ctx, branchName)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("branch %s does not exist", branchName)
+	}
+	
+	// Check if we're currently on this branch
+	currentBranch, err := g.GetCurrentBranch(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get current branch: %w", err)
+	}
+	if currentBranch == branchName {
+		return fmt.Errorf("cannot delete branch %s: currently checked out", branchName)
+	}
+	
+	// Delete the branch
+	cmd := exec.CommandContext(ctx, "git", "branch", "-d", branchName)
+	cmd.Dir = g.repoRoot
+	if err := cmd.Run(); err != nil {
+		// Try force delete if normal delete fails
+		cmd = exec.CommandContext(ctx, "git", "branch", "-D", branchName)
+		cmd.Dir = g.repoRoot
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("failed to delete branch %s: %w", branchName, err)
+		}
+	}
+	
+	return nil
+}
+
 // CreateWorktree creates a git worktree for the specified branch
 func (g *GitOperations) CreateWorktree(ctx context.Context, worktreePath, branchName, remoteBranch string) error {
 	// Pre-flight checks
