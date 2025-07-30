@@ -3,6 +3,7 @@ package container
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -159,6 +160,14 @@ func (r *baseRuntime) execCommandStreaming(ctx context.Context, args ...string) 
 	return cmd.Run()
 }
 
+func (r *baseRuntime) execCommandInteractive(ctx context.Context, args ...string) error {
+	cmd := exec.CommandContext(ctx, r.command, args...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
 // PodmanRuntime implements Runtime for Podman
 type PodmanRuntime struct {
 	baseRuntime
@@ -262,7 +271,7 @@ func (r *PodmanRuntime) Remove(ctx context.Context, containerID string) error {
 
 func (r *PodmanRuntime) Exec(ctx context.Context, containerID string, command []string) error {
 	args := append([]string{"exec", "-it", containerID}, command...)
-	return r.execCommandStreaming(ctx, args...)
+	return r.execCommandInteractive(ctx, args...)
 }
 
 func (r *PodmanRuntime) Status(ctx context.Context, containerID string) (Status, error) {
@@ -417,7 +426,7 @@ func (r *DockerRuntime) Remove(ctx context.Context, containerID string) error {
 
 func (r *DockerRuntime) Exec(ctx context.Context, containerID string, command []string) error {
 	args := append([]string{"exec", "-it", containerID}, command...)
-	return r.execCommandStreaming(ctx, args...)
+	return r.execCommandInteractive(ctx, args...)
 }
 
 func (r *DockerRuntime) Status(ctx context.Context, containerID string) (Status, error) {
