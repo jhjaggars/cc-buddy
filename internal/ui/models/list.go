@@ -24,8 +24,11 @@ type EnvironmentListModel struct {
 	err         error
 }
 
-// RefreshEnvironmentsMsg is sent when environments should be refreshed
+// RefreshEnvironmentsMsg is sent when environments should be refreshed (periodic)
 type RefreshEnvironmentsMsg struct{}
+
+// ManualRefreshMsg is sent when user manually refreshes (shows loading state)
+type ManualRefreshMsg struct{}
 
 // EnvironmentsLoadedMsg is sent when environments are loaded
 type EnvironmentsLoadedMsg struct {
@@ -99,15 +102,16 @@ func (m *EnvironmentListModel) Update(msg tea.Msg) (*EnvironmentListModel, tea.C
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "r":
-			// Refresh environments
-			m.loading = true
-			return m, m.refreshEnvironments()
+			// Manual refresh environments
+			return m, func() tea.Msg { return ManualRefreshMsg{} }
 			
 		case "enter":
-			// Open terminal for selected environment
+			// Request terminal opening (will quit TUI)
 			if m.table.SelectedRow() != nil {
 				envName := m.table.SelectedRow()[0]
-				return m, m.openTerminal(envName)
+				return m, func() tea.Msg {
+					return OpenTerminalMsg{Environment: envName}
+				}
 			}
 			
 		case "d":
@@ -119,16 +123,24 @@ func (m *EnvironmentListModel) Update(msg tea.Msg) (*EnvironmentListModel, tea.C
 			}
 		}
 
-	case RefreshEnvironmentsMsg:
+	case ManualRefreshMsg:
+		// Show loading state for manual refreshes
 		m.loading = true
+		return m, m.refreshEnvironments()
+
+	case RefreshEnvironmentsMsg:
+		// Periodic refresh - no loading state to prevent flashing
 		return m, m.refreshEnvironments()
 
 	case EnvironmentsLoadedMsg:
 		m.loading = false
 		m.err = msg.Error
 		if msg.Error == nil {
-			m.environments = msg.Environments
-			m.updateTableRows()
+			// Only update if environments have actually changed
+			if m.environmentsChanged(msg.Environments) {
+				m.environments = msg.Environments
+				m.updateTableRows()
+			}
 		}
 		// Continue periodic refresh
 		return m, m.startPeriodicRefresh()
@@ -259,17 +271,6 @@ func (m *EnvironmentListModel) updateTableRows() {
 	m.table.SetRows(rows)
 }
 
-// openTerminal opens a terminal for the specified environment
-func (m *EnvironmentListModel) openTerminal(envName string) tea.Cmd {
-	return func() tea.Msg {
-		ctx := context.Background()
-		if err := m.envManager.OpenTerminal(ctx, envName); err != nil {
-			// TODO: Show error message
-			return nil
-		}
-		return nil
-	}
-}
 
 // deleteEnvironment deletes the specified environment
 func (m *EnvironmentListModel) deleteEnvironment(envName string) tea.Cmd {
@@ -298,6 +299,29 @@ func getStatusDisplay(status string) string {
 	default:
 		return status
 	}
+}
+
+// environmentsChanged checks if the new environments differ from current ones
+func (m *EnvironmentListModel) environmentsChanged(newEnvs []config.Environment) bool {
+	if len(m.environments) != len(newEnvs) {
+		return true
+	}
+	
+	// Create maps for efficient comparison
+	current := make(map[string]config.Environment)
+	for _, env := range m.environments {
+		current[env.Name] = env
+	}
+	
+	for _, newEnv := range newEnvs {
+		if existing, exists := current[newEnv.Name]; !exists {
+			return true
+		} else if existing.Status != newEnv.Status || existing.ContainerID != newEnv.ContainerID {
+			return true
+		}
+	}
+	
+	return false
 }
 
 // formatTimeAgo formats a time as "2h ago", "1d ago", etc.

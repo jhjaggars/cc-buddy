@@ -89,8 +89,8 @@ func (m *StandaloneListModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Let confirmation model handle this
 				break
 			}
-			// Open terminal for selected environment
-			return m.handleTerminalAction()
+			// Request terminal opening (will quit TUI)
+			return m.requestTerminalOpen()
 
 		case "d":
 			if m.showConfirm {
@@ -102,10 +102,10 @@ func (m *StandaloneListModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "r":
 			if !m.showConfirm {
-				// Refresh environments
+				// Manual refresh environments
 				m.message = "Refreshing environments..."
 				m.messageStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("33"))
-				return m, func() tea.Msg { return RefreshEnvironmentsMsg{} }
+				return m, func() tea.Msg { return ManualRefreshMsg{} }
 			}
 		}
 
@@ -119,7 +119,7 @@ func (m *StandaloneListModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.selectedEnvName = ""
 		return m, nil
 
-	case RefreshEnvironmentsMsg, EnvironmentsLoadedMsg:
+	case ManualRefreshMsg, RefreshEnvironmentsMsg, EnvironmentsLoadedMsg:
 		// Clear any status messages when environments are loaded
 		if _, ok := msg.(EnvironmentsLoadedMsg); ok {
 			m.message = ""
@@ -220,8 +220,8 @@ func (m *StandaloneListModel) renderMainView() string {
 	return header + "\n\n" + content + footer
 }
 
-// handleTerminalAction opens terminal for the selected environment
-func (m *StandaloneListModel) handleTerminalAction() (tea.Model, tea.Cmd) {
+// requestTerminalOpen requests terminal opening for the selected environment
+func (m *StandaloneListModel) requestTerminalOpen() (tea.Model, tea.Cmd) {
 	selectedRow := m.listModel.table.SelectedRow()
 	if selectedRow == nil {
 		m.message = "No environment selected"
@@ -232,14 +232,7 @@ func (m *StandaloneListModel) handleTerminalAction() (tea.Model, tea.Cmd) {
 	envName := selectedRow[0]
 	
 	return m, func() tea.Msg {
-		ctx := context.Background()
-		if err := m.envManager.OpenTerminal(ctx, envName); err != nil {
-			return TerminalErrorMsg{
-				Environment: envName,
-				Error:       err,
-			}
-		}
-		return TerminalSuccessMsg{Environment: envName}
+		return OpenTerminalMsg{Environment: envName}
 	}
 }
 
@@ -312,5 +305,10 @@ type DeleteErrorMsg struct {
 }
 
 type DeleteSuccessMsg struct {
+	Environment string
+}
+
+// OpenTerminalMsg requests opening a terminal (causes TUI to quit)
+type OpenTerminalMsg struct {
 	Environment string
 }
