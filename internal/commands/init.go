@@ -201,12 +201,13 @@ func (c *InitCommand) generateContainerfile(baseImage string, packages, ports, v
 	// Base image
 	content.WriteString(fmt.Sprintf("FROM %s\n\n", baseImage))
 	
-	// System packages
-	if len(packages) > 0 {
+	// System packages - always include sudo for user sync functionality
+	allPackages := append([]string{"sudo"}, packages...)
+	if len(allPackages) > 0 {
 		content.WriteString("# Install system packages\n")
 		content.WriteString("RUN apt-get update && apt-get install -y \\\n")
-		for i, pkg := range packages {
-			if i == len(packages)-1 {
+		for i, pkg := range allPackages {
+			if i == len(allPackages)-1 {
 				content.WriteString(fmt.Sprintf("    %s \\\n", pkg))
 			} else {
 				content.WriteString(fmt.Sprintf("    %s \\\n", pkg))
@@ -214,6 +215,18 @@ func (c *InitCommand) generateContainerfile(baseImage string, packages, ports, v
 		}
 		content.WriteString("    && rm -rf /var/lib/apt/lists/*\n\n")
 	}
+	
+	// User synchronization setup
+	content.WriteString("# Create a non-root user with dynamic UID/GID matching host user\n")
+	content.WriteString("ARG USERNAME=developer\n")
+	content.WriteString("ARG USER_UID=1000\n")
+	content.WriteString("ARG USER_GID=1000\n\n")
+	
+	content.WriteString("# Create group and user with dynamic IDs\n")
+	content.WriteString("RUN groupadd --gid $USER_GID $USERNAME \\\n")
+	content.WriteString("    && useradd --uid $USER_UID --gid $USER_GID -m $USERNAME \\\n")
+	content.WriteString("    && echo $USERNAME ALL=\\(root\\) NOPASSWD:ALL > /etc/sudoers.d/$USERNAME \\\n")
+	content.WriteString("    && chmod 0440 /etc/sudoers.d/$USERNAME\n\n")
 	
 	// Environment variables
 	if len(envVars) > 0 {
@@ -242,11 +255,7 @@ func (c *InitCommand) generateContainerfile(baseImage string, packages, ports, v
 		content.WriteString("\n")
 	}
 	
-	// Working directory
-	content.WriteString("# Set working directory\n")
-	content.WriteString("WORKDIR /workspace\n\n")
-	
-	// Startup commands
+	// Startup commands (run as root before user switch)
 	if len(commands) > 0 {
 		content.WriteString("# Startup commands\n")
 		for _, cmd := range commands {
@@ -255,8 +264,27 @@ func (c *InitCommand) generateContainerfile(baseImage string, packages, ports, v
 		content.WriteString("\n")
 	}
 	
-	// Default command
-	content.WriteString("# Keep container running\n")
+	// Create workspace ownership fix script
+	content.WriteString("# Create workspace ownership fix script\n")
+	content.WriteString("RUN echo '#!/bin/bash\\n\\\n")
+	content.WriteString("# Fix workspace ownership to match container user\\n\\\n")
+	content.WriteString("if [ -d \"/workspace\" ]; then\\n\\\n")
+	content.WriteString("    sudo chown -R developer:developer /workspace || true\\n\\\n")
+	content.WriteString("fi\\n\\\n")
+	content.WriteString("# Execute the original command\\n\\\n")
+	content.WriteString("exec \"$@\"' > /usr/local/bin/fix-workspace-ownership.sh \\\n")
+	content.WriteString("    && chmod +x /usr/local/bin/fix-workspace-ownership.sh\n\n")
+	
+	// Switch to non-root user
+	content.WriteString("USER $USERNAME\n\n")
+	
+	// Working directory
+	content.WriteString("# Set working directory\n")
+	content.WriteString("WORKDIR /workspace\n\n")
+	
+	// Use the ownership fix script as entrypoint
+	content.WriteString("# Use the ownership fix script as entrypoint\n")
+	content.WriteString("ENTRYPOINT [\"/usr/local/bin/fix-workspace-ownership.sh\"]\n")
 	content.WriteString("CMD [\"tail\", \"-f\", \"/dev/null\"]\n")
 	
 	return content.String()

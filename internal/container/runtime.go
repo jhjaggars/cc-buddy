@@ -32,9 +32,10 @@ type RunOptions struct {
 
 // Mount represents a volume mount
 type Mount struct {
-	Source string
-	Target string
-	Type   string // "bind", "volume", etc.
+	Source  string
+	Target  string
+	Type    string   // "bind", "volume", etc.
+	Options []string // Mount options like "Z", "ro", etc.
 }
 
 // PortMapping represents port forwarding
@@ -204,6 +205,7 @@ func (r *PodmanRuntime) Build(ctx context.Context, opts BuildOptions) error {
 		args = append(args, "-f", opts.Dockerfile)
 	}
 	
+	// Add build arguments in a consistent order
 	for key, value := range opts.BuildArgs {
 		args = append(args, "--build-arg", fmt.Sprintf("%s=%s", key, value))
 	}
@@ -246,6 +248,11 @@ func (r *PodmanRuntime) Run(ctx context.Context, opts RunOptions) (string, error
 	
 	for _, mount := range opts.Mounts {
 		mountStr := fmt.Sprintf("type=%s,source=%s,target=%s", mount.Type, mount.Source, mount.Target)
+		if len(mount.Options) > 0 {
+			for _, option := range mount.Options {
+				mountStr += "," + option
+			}
+		}
 		args = append(args, "--mount", mountStr)
 	}
 	
@@ -373,6 +380,7 @@ func (r *DockerRuntime) Build(ctx context.Context, opts BuildOptions) error {
 		args = append(args, "-f", opts.Dockerfile)
 	}
 	
+	// Add build arguments in a consistent order
 	for key, value := range opts.BuildArgs {
 		args = append(args, "--build-arg", fmt.Sprintf("%s=%s", key, value))
 	}
@@ -415,6 +423,11 @@ func (r *DockerRuntime) Run(ctx context.Context, opts RunOptions) (string, error
 	
 	for _, mount := range opts.Mounts {
 		mountStr := fmt.Sprintf("type=%s,source=%s,target=%s", mount.Type, mount.Source, mount.Target)
+		if len(mount.Options) > 0 {
+			for _, option := range mount.Options {
+				mountStr += "," + option
+			}
+		}
 		args = append(args, "--mount", mountStr)
 	}
 	

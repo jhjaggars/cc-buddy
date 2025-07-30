@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/jhjaggars/cc-buddy/internal/config"
 	"github.com/jhjaggars/cc-buddy/internal/container"
+	"github.com/jhjaggars/cc-buddy/internal/system"
 )
 
 // Manager orchestrates environment creation, management, and cleanup
@@ -213,12 +215,20 @@ func (m *Manager) CreateEnvironment(ctx context.Context, opts CreateEnvironmentO
 		return nil, fmt.Errorf("containerfile not found: %s", containerfilePath)
 	}
 	
-	// Step 4: Build container image
+	// Step 4: Build container image with user sync
 	imageTag := fmt.Sprintf("cc-buddy-%s:latest", envName)
+	
+	// Get host user information for user ID synchronization
+	userInfo := system.GetUserInfoWithFallback()
+	
 	buildOpts := container.BuildOptions{
 		Context:    worktreePath,
 		Dockerfile: opts.Containerfile,
 		Tags:       []string{imageTag},
+		BuildArgs: map[string]string{
+			"USER_UID": strconv.Itoa(userInfo.UID),
+			"USER_GID": strconv.Itoa(userInfo.GID),
+		},
 	}
 	
 	if err := m.containerMgr.GetRuntime().Build(ctx, buildOpts); err != nil {
@@ -239,6 +249,7 @@ func (m *Manager) CreateEnvironment(ctx context.Context, opts CreateEnvironmentO
 			Type:   "bind",
 			Source: worktreePath,
 			Target: "/workspace",
+			Options: []string{"Z"}, // SELinux relabel for exclusive access
 		},
 		{
 			Type:   "volume",
@@ -251,11 +262,11 @@ func (m *Manager) CreateEnvironment(ctx context.Context, opts CreateEnvironmentO
 		"GITHUB_TOKEN": os.Getenv("GITHUB_TOKEN"),
 	}
 	
-	// Set default startup command if none provided
+	// Set startup command - let entrypoint handle the default case
 	startupCommand := opts.StartupCommand
 	if len(startupCommand) == 0 {
-		// Default command to keep container running
-		startupCommand = []string{"sleep", "infinity"}
+		// Use empty command to let Dockerfile CMD and ENTRYPOINT work together
+		startupCommand = nil
 	}
 
 	runOpts := container.RunOptions{

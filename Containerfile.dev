@@ -25,11 +25,12 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | d
     && apt-get update \
     && apt-get install gh -y
 
-# Create a non-root user
+# Create a non-root user with dynamic UID/GID matching host user
 ARG USERNAME=developer
 ARG USER_UID=1000
-ARG USER_GID=$USER_UID
+ARG USER_GID=1000
 
+# Create group and user with dynamic IDs
 RUN groupadd --gid $USER_GID $USERNAME \
     && useradd --uid $USER_UID --gid $USER_GID -m $USERNAME \
     && echo $USERNAME ALL=\(root\) NOPASSWD:ALL > /etc/sudoers.d/$USERNAME \
@@ -38,8 +39,23 @@ RUN groupadd --gid $USER_GID $USERNAME \
 # Create directory for Claude Code configuration (mounted at runtime)
 RUN mkdir -p /home/$USERNAME/.claude && chown $USERNAME:$USERNAME /home/$USERNAME/.claude
 
+# Create workspace ownership fix script
+RUN echo '#!/bin/bash\n\
+# Fix workspace ownership to match container user\n\
+if [ -d "/workspace" ]; then\n\
+    sudo chown -R developer:developer /workspace || true\n\
+fi\n\
+# Execute the original command\n\
+exec "$@"' > /usr/local/bin/fix-workspace-ownership.sh \
+    && chmod +x /usr/local/bin/fix-workspace-ownership.sh
+
+# Set USERNAME environment variable for runtime
+ENV USERNAME=$USERNAME
+
 USER $USERNAME
 
 WORKDIR /workspace
 
+# Use the ownership fix script as entrypoint
+ENTRYPOINT ["/usr/local/bin/fix-workspace-ownership.sh"]
 CMD ["/bin/bash"]
