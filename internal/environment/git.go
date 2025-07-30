@@ -116,8 +116,8 @@ func (g *GitOperations) CreateBranch(ctx context.Context, branchName string) err
 		return fmt.Errorf("branch %s already exists", branchName)
 	}
 	
-	// Create the branch
-	cmd := exec.CommandContext(ctx, "git", "checkout", "-b", branchName)
+	// Create the branch without checking it out
+	cmd := exec.CommandContext(ctx, "git", "branch", branchName)
 	cmd.Dir = g.repoRoot
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("failed to create branch %s: %w", branchName, err)
@@ -128,6 +128,11 @@ func (g *GitOperations) CreateBranch(ctx context.Context, branchName string) err
 
 // CreateWorktree creates a git worktree for the specified branch
 func (g *GitOperations) CreateWorktree(ctx context.Context, worktreePath, branchName, remoteBranch string) error {
+	// Pre-flight checks
+	if err := g.validateWorktreeCreation(ctx, worktreePath, branchName, remoteBranch); err != nil {
+		return err
+	}
+	
 	// Ensure the parent directory exists
 	parentDir := filepath.Dir(worktreePath)
 	if err := os.MkdirAll(parentDir, 0755); err != nil {
@@ -140,14 +145,24 @@ func (g *GitOperations) CreateWorktree(ctx context.Context, worktreePath, branch
 		// Create worktree from remote branch
 		args = append(args, worktreePath, remoteBranch)
 	} else {
-		// Create worktree from local branch
-		args = append(args, "-b", branchName, worktreePath)
+		// Create worktree from existing local branch
+		args = append(args, worktreePath, branchName)
 	}
 	
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = g.repoRoot
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to create worktree: %w", err)
+	
+	// Capture both stdout and stderr for better error reporting
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		gitOutput := strings.TrimSpace(string(output))
+		commandStr := fmt.Sprintf("git %s", strings.Join(args, " "))
+		
+		// Provide specific error messages based on common git errors
+		errorMsg := g.interpretWorktreeError(gitOutput, branchName, remoteBranch, worktreePath)
+		
+		return fmt.Errorf("failed to create worktree\nCommand: %s\nGit output: %s\nError: %s", 
+			commandStr, gitOutput, errorMsg)
 	}
 	
 	return nil
@@ -291,4 +306,99 @@ func (g *GitOperations) GenerateEnvironmentName(branchName string) (string, erro
 	safeBranch := strings.ReplaceAll(branchName, "/", "-")
 	
 	return fmt.Sprintf("%s-%s", repoName, safeBranch), nil
+}
+
+// validateWorktreeCreation performs pre-flight checks before creating a worktree
+func (g *GitOperations) validateWorktreeCreation(ctx context.Context, worktreePath, branchName, remoteBranch string) error {
+	// Check if worktree directory already exists and is not empty
+	if stat, err := os.Stat(worktreePath); err == nil {
+		if stat.IsDir() {
+			entries, err := os.ReadDir(worktreePath)
+			if err != nil {
+				return fmt.Errorf("cannot check worktree directory: %w", err)
+			}
+			if len(entries) > 0 {
+				return fmt.Errorf("worktree directory already exists and is not empty: %s", worktreePath)
+			}
+		} else {
+			return fmt.Errorf("worktree path exists but is not a directory: %s", worktreePath)
+		}
+	}
+	
+	// Check if branch is already checked out in another worktree
+	worktrees, err := g.ListWorktrees(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to check existing worktrees: %w", err)
+	}
+	
+	targetBranch := branchName
+	if remoteBranch != "" {
+		// For remote branches, the worktree will create a local tracking branch
+		targetBranch = branchName
+	}
+	
+	for _, wt := range worktrees {
+		if wt.Branch == targetBranch {
+			return fmt.Errorf("branch '%s' is already checked out in worktree: %s", targetBranch, wt.Path)
+		}
+	}
+	
+	// Check if the branch exists (for local branches)
+	if remoteBranch == "" {
+		exists, err := g.BranchExists(ctx, branchName)
+		if err != nil {
+			return fmt.Errorf("failed to check if branch exists: %w", err)
+		}
+		if !exists {
+			return fmt.Errorf("local branch '%s' does not exist\nTip: Use 'origin/%s' to create from remote branch, or create the local branch first", branchName, branchName)
+		}
+	}
+	
+	return nil
+}
+
+// interpretWorktreeError provides human-readable error messages for common git worktree failures
+func (g *GitOperations) interpretWorktreeError(gitOutput, branchName, remoteBranch, worktreePath string) string {
+	output := strings.ToLower(gitOutput)
+	
+	// Common git worktree error patterns
+	switch {
+	case strings.Contains(output, "already exists"):
+		return fmt.Sprintf("Directory already exists: %s", worktreePath)
+		
+	case strings.Contains(output, "is already checked out"):
+		return fmt.Sprintf("Branch '%s' is already checked out in another worktree", branchName)
+		
+	case strings.Contains(output, "not a valid object name"):
+		if remoteBranch != "" {
+			return fmt.Sprintf("Remote branch '%s' does not exist", remoteBranch)
+		}
+		return fmt.Sprintf("Branch '%s' does not exist", branchName)
+		
+	case strings.Contains(output, "invalid reference"):
+		return fmt.Sprintf("Invalid branch name: '%s'", branchName)
+		
+	case strings.Contains(output, "permission denied"):
+		return fmt.Sprintf("Permission denied when creating worktree at: %s", worktreePath)
+		
+	case strings.Contains(output, "not a git repository"):
+		return "Current directory is not a git repository"
+		
+	case strings.Contains(output, "no such file or directory"):
+		return fmt.Sprintf("Cannot create worktree directory: %s", worktreePath)
+		
+	default:
+		// Generic error message with troubleshooting tips
+		suggestions := []string{
+			fmt.Sprintf("• Check if branch '%s' exists: git branch -a", branchName),
+			"• Ensure the branch is not already checked out elsewhere",
+			fmt.Sprintf("• Verify write permissions for directory: %s", filepath.Dir(worktreePath)),
+		}
+		
+		if remoteBranch == "" && !strings.Contains(branchName, "/") {
+			suggestions = append(suggestions, fmt.Sprintf("• Try using remote branch: cc-buddy create origin/%s", branchName))
+		}
+		
+		return fmt.Sprintf("Git worktree creation failed. Troubleshooting:\n%s", strings.Join(suggestions, "\n"))
+	}
 }

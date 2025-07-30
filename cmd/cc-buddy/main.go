@@ -59,7 +59,7 @@ func main() {
 func handleCLIMode(args []string) error {
 	if len(args) == 0 {
 		fmt.Println("Usage: cc-buddy [command] [args...]")
-		fmt.Println("Commands: init, create, list, delete, terminal")
+		fmt.Println("Commands: init, create, list, delete, terminal, exec")
 		fmt.Println("Run without arguments for interactive mode")
 		return nil
 	}
@@ -109,6 +109,14 @@ func handleCLIMode(args []string) error {
 		terminalCmd := commands.NewTerminalCommand(envManager)
 		return terminalCmd.Execute(ctx, commandArgs)
 
+	case "exec":
+		envManager, err := environment.NewManager()
+		if err != nil {
+			return fmt.Errorf("failed to initialize: %w", err)
+		}
+		execCmd := commands.NewExecCommand(envManager)
+		return execCmd.Execute(ctx, commandArgs)
+
 	case "help", "-h", "--help":
 		printHelp()
 		return nil
@@ -154,19 +162,23 @@ func printHelp() {
 	fmt.Println()
 	fmt.Println("COMMANDS:")
 	fmt.Println("    init                        Generate Containerfile.dev interactively")
-	fmt.Println("    create <branch-name>        Create new development environment")
+	fmt.Println("    create <branch-name> [-e \"cmd\"] Create new development environment")
 	fmt.Println("    list [--plain]              Interactive environment list (--plain for text)")
 	fmt.Println("    delete <env-name>           Delete an environment")
 	fmt.Println("    terminal <env-name>         Open terminal in environment")
+	fmt.Println("    exec <env-name> -- <command> Execute command in environment")
 	fmt.Println("    help                        Show this help message")
 	fmt.Println()
 	fmt.Println("EXAMPLES:")
 	fmt.Println("    cc-buddy init")
 	fmt.Println("    cc-buddy create feature-auth")
+	fmt.Println("    cc-buddy create feature-auth -e \"npm run dev\"")
 	fmt.Println("    cc-buddy create origin/main")
 	fmt.Println("    cc-buddy list                      # Interactive list with navigation")
 	fmt.Println("    cc-buddy list --plain              # Plain text output for scripts") 
 	fmt.Println("    cc-buddy terminal myrepo-feature-auth")
+	fmt.Println("    cc-buddy exec myrepo-feature-auth -- npm test")
+	fmt.Println("    cc-buddy exec myrepo-feature-auth -- bash -c \"cd /workspace && make build\"")
 	fmt.Println("    cc-buddy delete myrepo-feature-auth")
 	fmt.Println()
 	fmt.Println("For more information, visit: https://github.com/jhjaggars/cc-buddy")

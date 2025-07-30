@@ -31,12 +31,13 @@ This is `cc-buddy`, a Go application for PR automation that creates isolated dev
 
 ### Key Functionality
 
-The application provides five main commands:
+The application provides six main commands:
 - `init` - Generates Containerfile.dev interactively
-- `create <branch-name>` - Creates isolated development environment with git worktree and container
-- `list` - Shows all active environments with status (interactive TUI by default, `--plain` for text output)
+- `create <branch-name> [-e "command"]` - Creates isolated development environment with git worktree and container
+- `list` - Shows all active environments with status (interactive TUI by default, `--plain` for text output)  
 - `delete <environment-name>` - Cleans up environment resources
 - `terminal <environment-name>` - Opens shell in running environment
+- `exec <environment-name> -- <command>` - Executes arbitrary commands in running environments
 
 ### Operational Modes
 
@@ -66,10 +67,13 @@ cc-buddy                                   # Launch interactive interface
 ```bash
 cc-buddy init                              # Initialize Containerfile.dev
 cc-buddy create feature-branch             # Create environment for branch
+cc-buddy create feature-branch -e "npm run dev"  # Create with custom startup command
 cc-buddy create origin/feature-branch      # Create from remote branch
 cc-buddy list                              # Interactive environment list
 cc-buddy list --plain                      # Plain text output for scripts
 cc-buddy terminal myrepo-feature-branch    # Open shell in environment
+cc-buddy exec myrepo-feature-branch -- npm test    # Execute command in environment
+cc-buddy exec myrepo-feature-branch -- bash -c "cd /workspace && make build"  # Complex command
 cc-buddy delete myrepo-feature-branch      # Delete environment
 ```
 
@@ -90,7 +94,9 @@ cc-buddy                                  # Launch TUI, navigate with arrow keys
 
 # CLI mode
 cc-buddy create my-feature                # Create environment
+cc-buddy create my-feature -e "python -m http.server 8000"  # Create with custom startup
 cc-buddy terminal myrepo-my-feature       # Open terminal in environment
+cc-buddy exec myrepo-my-feature -- npm test  # Execute commands in environment
 cc-buddy delete myrepo-my-feature         # Clean up when done
 
 # Alternative: direct container access

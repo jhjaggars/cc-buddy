@@ -67,6 +67,7 @@ type CreateEnvironmentOptions struct {
 	WorktreeDir     string
 	Containerfile   string
 	ExposeAllPorts  bool
+	StartupCommand  []string
 }
 
 // CreateEnvironment creates a new development environment
@@ -179,26 +180,38 @@ func (m *Manager) CreateEnvironment(ctx context.Context, opts CreateEnvironmentO
 	}
 	
 	// Step 6: Start container
+	mounts := []container.Mount{
+		{
+			Type:   "bind",
+			Source: worktreePath,
+			Target: "/workspace",
+		},
+		{
+			Type:   "volume",
+			Source: env.VolumeName,
+			Target: "/data",
+		},
+	}
+	
+	envVars := map[string]string{
+		"GITHUB_TOKEN": os.Getenv("GITHUB_TOKEN"),
+	}
+	
+	// Set default startup command if none provided
+	startupCommand := opts.StartupCommand
+	if len(startupCommand) == 0 {
+		// Default command to keep container running
+		startupCommand = []string{"sleep", "infinity"}
+	}
+
 	runOpts := container.RunOptions{
 		Name:       env.ContainerName,
 		Image:      imageTag,
 		WorkingDir: "/workspace",
 		Detach:     true,
-		Mounts: []container.Mount{
-			{
-				Type:   "bind",
-				Source: worktreePath,
-				Target: "/workspace",
-			},
-			{
-				Type:   "volume",
-				Source: env.VolumeName,
-				Target: "/data",
-			},
-		},
-		EnvVars: map[string]string{
-			"GITHUB_TOKEN": os.Getenv("GITHUB_TOKEN"),
-		},
+		Mounts:     mounts,
+		EnvVars:    envVars,
+		Command:    startupCommand,
 	}
 	
 	// Add port mappings if requested
@@ -333,6 +346,35 @@ func (m *Manager) OpenTerminal(ctx context.Context, envName string) error {
 	
 	// Open terminal
 	return m.containerMgr.GetRuntime().Exec(ctx, env.ContainerID, []string{"/bin/bash"})
+}
+
+// ExecuteCommand executes a command in the environment's container
+func (m *Manager) ExecuteCommand(ctx context.Context, envName string, command []string, interactive bool) error {
+	env, err := m.configMgr.GetEnvironment(envName)
+	if err != nil {
+		return fmt.Errorf("environment not found: %w", err)
+	}
+	
+	if env.ContainerID == "" {
+		return fmt.Errorf("environment %s has no running container", envName)
+	}
+	
+	// Check container status
+	status, err := m.containerMgr.GetRuntime().Status(ctx, env.ContainerID)
+	if err != nil {
+		return fmt.Errorf("failed to check container status: %w", err)
+	}
+	
+	if !status.Running {
+		return fmt.Errorf("container for environment %s is not running", envName)
+	}
+	
+	// Execute command with runtime-specific implementation
+	if interactive {
+		return m.containerMgr.GetRuntime().Exec(ctx, env.ContainerID, command)
+	} else {
+		return m.containerMgr.GetRuntime().ExecNonInteractive(ctx, env.ContainerID, command)
+	}
 }
 
 // GetConfig returns the configuration manager

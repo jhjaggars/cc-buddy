@@ -27,6 +27,7 @@ type RunOptions struct {
 	Remove      bool
 	Interactive bool
 	TTY         bool
+	Command     []string
 }
 
 // Mount represents a volume mount
@@ -71,8 +72,11 @@ type Runtime interface {
 	// Remove removes a container
 	Remove(ctx context.Context, containerID string) error
 	
-	// Exec executes a command in a running container
+	// Exec executes a command in a running container (interactive mode)
 	Exec(ctx context.Context, containerID string, command []string) error
+	
+	// ExecNonInteractive executes a command in a running container (non-interactive mode)
+	ExecNonInteractive(ctx context.Context, containerID string, command []string) error
 	
 	// Status returns the status of a container
 	Status(ctx context.Context, containerID string) (Status, error)
@@ -253,6 +257,11 @@ func (r *PodmanRuntime) Run(ctx context.Context, opts RunOptions) (string, error
 	
 	args = append(args, opts.Image)
 	
+	// Add custom command if specified
+	if len(opts.Command) > 0 {
+		args = append(args, opts.Command...)
+	}
+	
 	out, err := r.execCommand(ctx, args...)
 	if err != nil {
 		return "", err
@@ -272,6 +281,11 @@ func (r *PodmanRuntime) Remove(ctx context.Context, containerID string) error {
 func (r *PodmanRuntime) Exec(ctx context.Context, containerID string, command []string) error {
 	args := append([]string{"exec", "-it", containerID}, command...)
 	return r.execCommandInteractive(ctx, args...)
+}
+
+func (r *PodmanRuntime) ExecNonInteractive(ctx context.Context, containerID string, command []string) error {
+	args := append([]string{"exec", containerID}, command...)
+	return r.execCommandStreaming(ctx, args...)
 }
 
 func (r *PodmanRuntime) Status(ctx context.Context, containerID string) (Status, error) {
@@ -408,6 +422,11 @@ func (r *DockerRuntime) Run(ctx context.Context, opts RunOptions) (string, error
 	
 	args = append(args, opts.Image)
 	
+	// Add custom command if specified
+	if len(opts.Command) > 0 {
+		args = append(args, opts.Command...)
+	}
+	
 	out, err := r.execCommand(ctx, args...)
 	if err != nil {
 		return "", err
@@ -427,6 +446,11 @@ func (r *DockerRuntime) Remove(ctx context.Context, containerID string) error {
 func (r *DockerRuntime) Exec(ctx context.Context, containerID string, command []string) error {
 	args := append([]string{"exec", "-it", containerID}, command...)
 	return r.execCommandInteractive(ctx, args...)
+}
+
+func (r *DockerRuntime) ExecNonInteractive(ctx context.Context, containerID string, command []string) error {
+	args := append([]string{"exec", containerID}, command...)
+	return r.execCommandStreaming(ctx, args...)
 }
 
 func (r *DockerRuntime) Status(ctx context.Context, containerID string) (Status, error) {
